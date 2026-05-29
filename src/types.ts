@@ -18,8 +18,9 @@ export type ReadStatus = 'borrowed' | 'reading' | 'finished' | 'abandoned';
 export type ReadFormat = 'audiobook' | 'ebook' | 'physical';
 
 /**
- * Where this entry came from in the pipeline. Useful for consumers that want
- * to render Libby-sourced and manually-entered books differently.
+ * Pipeline provenance: which parser produced this entry. This is a structural
+ * value about the data path, not the user-facing origin of the book. For the
+ * latter, see the free-form `source` field on ReadEntry.
  */
 export type ReadSource = 'libby' | 'extras';
 
@@ -53,7 +54,15 @@ export interface ReadEntry {
   subjects?: string[];
 
   // Provenance
-  source: ReadSource;
+  /** Which parser produced this entry. Pipeline provenance, not user-facing origin. */
+  provenance: ReadSource;
+  /**
+   * Free-form origin of this read, written by the user or defaulted by the
+   * orchestrator. Examples: 'library', "Powell's", 'Audible', 'borrowed from
+   * Joel'. Distinct from `provenance`, which records which parser produced
+   * the entry. The consumer page renders this when present.
+   */
+  source?: string;
   /** Library system name, when known (e.g. from Libby). */
   library?: string;
   publisher?: string;
@@ -99,4 +108,34 @@ export interface RawLibbyEntry {
   library?: string;
   /** Trimmed details column (e.g. "21 days"). Empty/whitespace-only values become undefined. */
   details?: string;
+}
+
+/**
+ * The raw shape of a single entry from a hand-edited extras file (YAML or JSON),
+ * after parsing but before normalization into a ReadEntry. Fields appear exactly
+ * as the user wrote them, with status and format validated against their enums
+ * and dates validated against ISO YYYY-MM-DD.
+ *
+ * An entry must have either `isbn` OR both `title` and `author`. Entries
+ * missing both identifier paths are rejected with a warning during parse.
+ */
+export interface RawExtrasEntry {
+  isbn?: string;
+  /** Open Library ID, for manual override of fuzzy enrichment matches. */
+  olid?: string;
+  title?: string;
+  author?: string;
+  status: ReadStatus;
+  format?: ReadFormat;
+  /** Free-form origin of this read: 'library', "Powell's", 'Audible', etc. */
+  source?: string;
+  /** ISO date YYYY-MM-DD. */
+  startedAt?: string;
+  /** ISO date YYYY-MM-DD. */
+  finishedAt?: string;
+  /** ISO date YYYY-MM-DD. */
+  borrowedAt?: string;
+  notes?: string;
+  /** If true, the orchestrator will exclude this entry from output by default. */
+  private?: boolean;
 }

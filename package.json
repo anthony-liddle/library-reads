@@ -70,6 +70,7 @@
     }
   },
   "dependencies": {
-    "csv-parse": "^6.2.1"
+    "csv-parse": "^6.2.1",
+    "yaml": "^2.9.0"
   }
 }
