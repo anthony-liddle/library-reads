@@ -14,6 +14,3 @@ coverage/
 .DS_Store
 .vscode/*
 !.vscode/settings.json
-
-# Local dogfooding cache
-.library-reads-cache.json
