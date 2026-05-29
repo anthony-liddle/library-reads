@@ -53,9 +53,26 @@ export interface ReadEntry {
   publishYear?: number;
   subjects?: string[];
 
+  /**
+   * The canonical date for sorting and "lately" calculations, derived from
+   * status. ISO date string (YYYY-MM-DD). The orchestrator computes this.
+   *
+   * Derivation:
+   * - finished, abandoned -> finishedAt (preferred) or startedAt
+   * - reading -> startedAt
+   * - borrowed -> borrowedAt
+   *
+   * If none of the relevant dates exist, sortDate is the empty string and
+   * the entry will sort to the end. This shouldn't happen for valid entries
+   * but the field is required so consumers don't have to optional-chain.
+   */
+  sortDate: string;
+
   // Provenance
   /** Which parser produced this entry. Pipeline provenance, not user-facing origin. */
   provenance: ReadSource;
+  /** When true, excluded from output unless the consumer opts in. Set from extras. */
+  private?: boolean;
   /**
    * Free-form origin of this read, written by the user or defaulted by the
    * orchestrator. Examples: 'library', "Powell's", 'Audible', 'borrowed from

@@ -57,6 +57,7 @@ const makeEntry = (overrides: Partial<ReadEntry> = {}): ReadEntry => ({
   title: 'The Overstory',
   author: 'Richard Powers',
   status: 'finished',
+  sortDate: '',
   provenance: 'extras',
   ...overrides,
 });
@@ -825,6 +826,70 @@ describe('enrich: rate limiting', () => {
       rateLimitMs: 200,
     });
     expect(calls[0].at - start).toBeLessThan(200);
+  });
+
+  it('shares state across two sequential calls when rateLimiterState is provided', async () => {
+    const { fn, calls } = routerFetch({
+      '/isbn/': { body: editionFixture() },
+    });
+    const rateLimiterState = { nextAllowedAt: 0 };
+    await enrich(makeEntry({ isbn: '9780374275631' }), {
+      userAgent: USER_AGENT,
+      cache: {},
+      fetchImpl: fn,
+      rateLimitMs: 40,
+      rateLimiterState,
+    });
+    await enrich(makeEntry({ isbn: '9780000000000' }), {
+      userAgent: USER_AGENT,
+      cache: {},
+      fetchImpl: fn,
+      rateLimitMs: 40,
+      rateLimiterState,
+    });
+    // The second call's first request must respect the budget set by the
+    // first call's last request.
+    expect(calls).toHaveLength(2);
+    expect(calls[1].at - calls[0].at).toBeGreaterThanOrEqual(40);
+  });
+
+  it('does NOT share state across calls when rateLimiterState is omitted', async () => {
+    const { fn, calls } = routerFetch({
+      '/isbn/': { body: editionFixture() },
+    });
+    await enrich(makeEntry({ isbn: '9780374275631' }), {
+      userAgent: USER_AGENT,
+      cache: {},
+      fetchImpl: fn,
+      rateLimitMs: 200,
+    });
+    await enrich(makeEntry({ isbn: '9780000000000' }), {
+      userAgent: USER_AGENT,
+      cache: {},
+      fetchImpl: fn,
+      rateLimitMs: 200,
+    });
+    // Each call starts a fresh per-call limiter, so the second call's first
+    // request does not wait for the first call's budget.
+    expect(calls).toHaveLength(2);
+    expect(calls[1].at - calls[0].at).toBeLessThan(200);
+  });
+
+  it('mutates the rateLimiterState object in place', async () => {
+    const { fn } = routerFetch({
+      '/isbn/': { body: editionFixture() },
+    });
+    const rateLimiterState = { nextAllowedAt: 0 };
+    const before = Date.now();
+    await enrich(makeEntry({ isbn: '9780374275631' }), {
+      userAgent: USER_AGENT,
+      cache: {},
+      fetchImpl: fn,
+      rateLimitMs: 40,
+      rateLimiterState,
+    });
+    // The caller sees the updated budget after enrich returns.
+    expect(rateLimiterState.nextAllowedAt).toBeGreaterThanOrEqual(before);
   });
 });
 

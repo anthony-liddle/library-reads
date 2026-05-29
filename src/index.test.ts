@@ -7,6 +7,7 @@ describe('library-reads wiring', () => {
       title: 'The Left Hand of Darkness',
       author: 'Ursula K. Le Guin',
       status: 'finished',
+      sortDate: '1969-03-01',
       provenance: 'extras',
     };
 
