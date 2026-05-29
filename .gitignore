@@ -1,0 +1,19 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Test coverage
+coverage/
+
+# Logs
+*.log
+
+# Editor and OS cruft
+.DS_Store
+.vscode/*
+!.vscode/settings.json
+
+# Local dogfooding cache
+.library-reads-cache.json
