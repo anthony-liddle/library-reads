@@ -65,6 +65,19 @@ export interface EnrichOptions {
   /** Minimum ms between requests. Default 1000 (1 req/sec). */
   rateLimitMs?: number;
   /**
+   * Shared rate-limiter state. When provided, sequential `enrich` calls
+   * coordinate so that the 1 req/sec budget is honored across the entire
+   * batch, not just within each call. The orchestrator creates one and
+   * passes the same reference to every call.
+   *
+   * Shape: `{ nextAllowedAt: number }` where nextAllowedAt is a millisecond
+   * timestamp. Both reads and writes happen during a single enrich call.
+   *
+   * When omitted, each enrich call uses its own per-call state (correct in
+   * isolation but unsafe in batches).
+   */
+  rateLimiterState?: { nextAllowedAt: number };
+  /**
    * Preferences applied when picking a representative edition from a work's editions list.
    * Defaults are Anglocentric and lean toward complete + recent editions; override via this
    * option to prefer a different language, original publications, etc.
@@ -445,18 +458,20 @@ export async function enrich(entry: ReadEntry, options: EnrichOptions): Promise<
     }
   }
 
-  // Per-call rate limiter: sleep until the next allowed time before each request.
-  let nextAllowedAt = 0;
+  // Rate limiter: sleep until the next allowed time before each request. When a
+  // shared rateLimiterState is provided, the budget is coordinated across calls;
+  // otherwise a per-call state object is used (fresh on every call).
+  const rateLimiter = options.rateLimiterState ?? { nextAllowedAt: 0 };
   let anyFailure = false;
   const data: EnrichmentData = {};
 
   /** Fetch a JSON endpoint, applying the rate limit and recording failures as warnings. */
   const get = async (url: string): Promise<unknown | undefined> => {
     const now = Date.now();
-    if (now < nextAllowedAt) {
-      await sleep(nextAllowedAt - now);
+    if (now < rateLimiter.nextAllowedAt) {
+      await sleep(rateLimiter.nextAllowedAt - now);
     }
-    nextAllowedAt = Date.now() + rateLimitMs;
+    rateLimiter.nextAllowedAt = Date.now() + rateLimitMs;
 
     let response: Response;
     try {
