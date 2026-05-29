@@ -68,5 +68,8 @@
     "overrides": {
       "@arethetypeswrong/core>fflate": "0.8.2"
     }
+  },
+  "dependencies": {
+    "csv-parse": "^6.2.1"
   }
 }

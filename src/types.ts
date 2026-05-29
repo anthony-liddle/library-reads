@@ -73,3 +73,30 @@ export interface ReadResult {
   /** Soft failures and notable events from the build (fallback matches, missing covers, etc.). */
   warnings: string[];
 }
+
+/**
+ * The raw shape of a single row from a Libby timeline CSV export, after
+ * parsing but before normalization into a ReadEntry. Fields appear exactly
+ * as they do in the source CSV, with dates normalized to ISO YYYY-MM-DD.
+ * Empty-string fields in the source surface as undefined here.
+ *
+ * Field names match the CSV columns: cover, title, author, publisher, isbn,
+ * timestamp, activity, library, details.
+ */
+export interface RawLibbyEntry {
+  /** OverDrive CDN URL for the cover. May be used as fallback if Open Library has no cover. */
+  cover?: string;
+  title: string;
+  author?: string;
+  publisher?: string;
+  /** ISBN as it appeared in the CSV. May be ISBN-10 or ISBN-13; not normalized here. */
+  isbn?: string;
+  /** Borrow date, normalized from the source timestamp to ISO YYYY-MM-DD. */
+  borrowedAt: string;
+  /** The activity column value. In all-loans exports this is always "Borrowed". */
+  activity: string;
+  /** Library system name, e.g. "Washington County Cooperative Library Services". */
+  library?: string;
+  /** Trimmed details column (e.g. "21 days"). Empty/whitespace-only values become undefined. */
+  details?: string;
+}

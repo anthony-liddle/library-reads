@@ -10,6 +10,10 @@ overrides:
 importers:
 
   .:
+    dependencies:
+      csv-parse:
+        specifier: ^6.2.1
+        version: 6.2.1
     devDependencies:
       '@arethetypeswrong/cli':
         specifier: ^0.18.2
@@ -563,6 +567,9 @@ packages:
 
   convert-source-map@2.0.0:
     resolution: {integrity: sha512-Kvp459HrV2FEJ1CAsi1Ku+MY3kasH19TFykTz2xWmMeq6bk2NU3XXvfJ+Q61m0xktWwt+1HSYf3JZsTms3aRJg==}
+
+  csv-parse@6.2.1:
+    resolution: {integrity: sha512-LRLMV+UCyfMokp8Wb411duBf1gaBKJfOfBWU9eHMJ+b+cJYZsNu3AFmjJf3+yPGd59Exz1TsMjaSFyxnYB9+IQ==}
 
   defu@6.1.7:
     resolution: {integrity: sha512-7z22QmUWiQ/2d0KkdYmANbRUVABpZ9SNYyH5vx6PZ+nE5bcC0l7uFvEfHlyld/HcGBFTL536ClDt3DEcSlEJAQ==}
@@ -1476,6 +1483,8 @@ snapshots:
   commander@10.0.1: {}
 
   convert-source-map@2.0.0: {}
+
+  csv-parse@6.2.1: {}
 
   defu@6.1.7: {}
 
