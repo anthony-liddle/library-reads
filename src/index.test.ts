@@ -7,7 +7,7 @@ describe('library-reads wiring', () => {
       title: 'The Left Hand of Darkness',
       author: 'Ursula K. Le Guin',
       status: 'finished',
-      source: 'extras',
+      provenance: 'extras',
     };
 
     expect(entry.title).toBe('The Left Hand of Darkness');
