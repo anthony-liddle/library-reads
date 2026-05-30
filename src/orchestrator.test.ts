@@ -668,6 +668,40 @@ describe('getReads: cache I/O', () => {
     expect(result.entries[0].pageCount).toBe(123);
   });
 
+  it('persists a notFound entry across builds and reuses it without refetching', async () => {
+    const cachePath = join(tmp, 'cache.json');
+    const ghost = libbyCsv({
+      title: 'Ghost',
+      isbn: '9780000000009',
+      timestamp: 'January 1, 2024 10:30',
+    });
+    // First build: Open Library 404s, so a notFound entry is written.
+    const fn1 = vi.fn(async (): Promise<Response> => json({}, 404));
+    await getReads({
+      libby: { content: ghost },
+      cache: { path: cachePath },
+      userAgent: USER_AGENT,
+      fetchImpl: fn1 as unknown as typeof fetch,
+      rateLimitMs: 0,
+    });
+    const written: Record<string, { notFound?: boolean }> = JSON.parse(
+      readFileSync(cachePath, 'utf-8'),
+    );
+    expect(written['isbn:9780000000009']?.notFound).toBe(true);
+
+    // Second build: Open Library is down, but the cached notFound skips the fetch.
+    const { fn: fn2, calls } = throwingFetch();
+    const result = await getReads({
+      libby: { content: ghost },
+      cache: { path: cachePath },
+      userAgent: USER_AGENT,
+      fetchImpl: fn2 as unknown as typeof fetch,
+      rateLimitMs: 0,
+    });
+    expect(calls).toHaveLength(0);
+    expect(result.entries).toHaveLength(1);
+  });
+
   it('creates an empty cache when the file does not exist (no warning)', async () => {
     const cachePath = join(tmp, 'missing.json');
     const result = await getReads({
@@ -846,6 +880,135 @@ describe('getReads: Open Library unavailable rollup', () => {
       rateLimitMs: 0,
     });
     expect(result.warnings[0]).toContain('Open Library appears to be unavailable');
+  });
+
+  it('does NOT fire when every enrichment attempt returned 404', async () => {
+    const fn = vi.fn(async (): Promise<Response> => json({}, 404));
+    const result = await getReads({
+      libby: { content: twoIsbn },
+      userAgent: USER_AGENT,
+      fetchImpl: fn as unknown as typeof fetch,
+      rateLimitMs: 0,
+    });
+    expect(result.warnings.some((w) => w.includes('appears to be unavailable'))).toBe(false);
+    expect(result.warnings.some((w) => w.includes('has no record'))).toBe(true);
+  });
+
+  it('still fires when most enrichment attempts returned HTTP 500', async () => {
+    const fn = vi.fn(async (): Promise<Response> => json({}, 500));
+    const result = await getReads({
+      libby: { content: twoIsbn },
+      userAgent: USER_AGENT,
+      fetchImpl: fn as unknown as typeof fetch,
+      rateLimitMs: 0,
+    });
+    expect(result.warnings[0]).toContain('Open Library appears to be unavailable');
+    expect(result.warnings[0]).toContain('2 of 2');
+  });
+
+  it('does NOT fire for a mix of 404s and a single transport error', async () => {
+    const fn = vi.fn(async (input: RequestInfo | URL): Promise<Response> => {
+      if (String(input).includes('/isbn/9780000000001')) {
+        throw new Error('ECONNREFUSED');
+      }
+      return json({}, 404);
+    });
+    const result = await getReads({
+      libby: {
+        content: libbyCsv(
+          { title: 'A', isbn: '9780000000001', timestamp: 'January 1, 2024 10:30' },
+          { title: 'B', isbn: '9780000000002', timestamp: 'January 2, 2024 10:30' },
+          { title: 'C', isbn: '9780000000003', timestamp: 'January 3, 2024 10:30' },
+        ),
+      },
+      userAgent: USER_AGENT,
+      fetchImpl: fn as unknown as typeof fetch,
+      rateLimitMs: 0,
+    });
+    // 1 transport failure of 3 attempts is below the half threshold.
+    expect(result.warnings.some((w) => w.includes('appears to be unavailable'))).toBe(false);
+    expect(result.warnings.some((w) => w.includes('failed to reach'))).toBe(true);
+  });
+});
+
+describe('getReads: ISBN 404 title+author fallback', () => {
+  it('reuses a cached fallback result across builds through the cache file (no refetch)', async () => {
+    const cachePath = join(tmp, 'cache.json');
+    const libby = libbyCsv({
+      title: 'Fallback Book',
+      author: 'Some Author',
+      isbn: '9780000000001',
+      timestamp: 'January 1, 2024 10:30',
+    });
+    // First build: ISBN 404s, fallback search resolves and is enriched.
+    const fn1 = vi.fn(async (input: RequestInfo | URL): Promise<Response> => {
+      const url = String(input);
+      if (url.includes('/isbn/')) {
+        return json({}, 404);
+      }
+      if (url.includes('search.json')) {
+        return json({ docs: [{ key: '/works/OL1W', cover_i: 5 }] });
+      }
+      if (url.includes('editions.json')) {
+        return json({ entries: [{ number_of_pages: 350, covers: [5] }] });
+      }
+      return json({});
+    });
+    await getReads({
+      libby: { content: libby },
+      cache: { path: cachePath },
+      userAgent: USER_AGENT,
+      fetchImpl: fn1 as unknown as typeof fetch,
+      rateLimitMs: 0,
+    });
+
+    // Second build: Open Library is down. The notFound-ISBN must resolve to the
+    // cached title-author fallback, so no fetch happens and the entry stays enriched.
+    const { fn: fn2, calls } = throwingFetch();
+    const result = await getReads({
+      libby: { content: libby },
+      cache: { path: cachePath },
+      userAgent: USER_AGENT,
+      fetchImpl: fn2 as unknown as typeof fetch,
+      rateLimitMs: 0,
+    });
+    expect(calls).toHaveLength(0);
+    expect(result.entries.find((e) => e.title === 'Fallback Book')?.pageCount).toBe(350);
+  });
+
+  it('enriches via fallback search and does not fire the unavailable rollup', async () => {
+    const fn = vi.fn(async (input: RequestInfo | URL): Promise<Response> => {
+      const url = String(input);
+      if (url.includes('/isbn/')) {
+        return json({}, 404);
+      }
+      if (url.includes('search.json')) {
+        return json({ docs: [{ key: '/works/OL1W', cover_i: 5 }] });
+      }
+      if (url.includes('editions.json')) {
+        return json({
+          entries: [{ number_of_pages: 350, covers: [5], physical_format: 'Hardcover' }],
+        });
+      }
+      return json({});
+    });
+    const result = await getReads({
+      libby: {
+        content: libbyCsv({
+          title: 'Fallback Book',
+          author: 'Some Author',
+          isbn: '9780000000001',
+          timestamp: 'January 1, 2024 10:30',
+        }),
+      },
+      userAgent: USER_AGENT,
+      fetchImpl: fn as unknown as typeof fetch,
+      rateLimitMs: 0,
+    });
+    const entry = result.entries.find((e) => e.title === 'Fallback Book');
+    expect(entry?.pageCount).toBe(350);
+    expect(result.warnings.some((w) => w.includes('fell back'))).toBe(true);
+    expect(result.warnings.some((w) => w.includes('appears to be unavailable'))).toBe(false);
   });
 });
 

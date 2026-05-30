@@ -19,6 +19,14 @@ export interface CacheEntry {
   /** The lookup key we used: 'isbn:{isbn}', 'olid:{olid}', or 'title-author:{hash}'. */
   lookupKey: string;
   data: EnrichmentData;
+  /**
+   * True when the lookup definitively returned 404 (Open Library doesn't
+   * have this book). Distinguishes "we tried and it isn't there" from
+   * "we got a sparse but valid record." Negative cache entries are
+   * refetched on the same maxAgeDays schedule as positive ones; busting
+   * a key forces a refetch regardless.
+   */
+  notFound?: boolean;
 }
 
 /** The full cache file shape. Keys are the lookupKey values. */
@@ -450,10 +458,26 @@ export async function enrich(entry: ReadEntry, options: EnrichOptions): Promise<
     return { entry, warnings };
   }
 
-  // Cache read.
+  const hasTitleAndAuthor = isNonEmpty(entry.title) && isNonEmpty(entry.author);
+
+  // Cache read. A fresh entry that is not busted is reused as-is. A notFound
+  // entry (data is {}) merges to a no-op, so the entry is returned unenriched
+  // with no fetch and no warning. The one wrinkle is the ISBN-404 fallback
+  // (see below): a fallback hit caches the result under the title-author key and
+  // a notFound under the ISBN key, so when an ISBN is a known dead end we look to
+  // the title-author key for a cached fallback result before giving up.
+  const usable = (c: CacheEntry | undefined): c is CacheEntry =>
+    c !== undefined && !bust.has(c.lookupKey) && !shouldRefetch(c, maxAgeDays);
   if (!options.ignoreCache) {
     const cached = options.cache[lookupKey];
-    if (cached !== undefined && !bust.has(lookupKey) && !shouldRefetch(cached, maxAgeDays)) {
+    if (usable(cached)) {
+      if (cached.notFound && lookupKey.startsWith('isbn:') && hasTitleAndAuthor) {
+        const fallbackKey = `title-author:${hashTitleAuthor(entry.title, entry.author)}`;
+        const fallback = options.cache[fallbackKey];
+        if (usable(fallback)) {
+          return { entry: mergeEnrichment(entry, fallback.data), warnings };
+        }
+      }
       return { entry: mergeEnrichment(entry, cached.data), warnings };
     }
   }
@@ -465,8 +489,28 @@ export async function enrich(entry: ReadEntry, options: EnrichOptions): Promise<
   let anyFailure = false;
   const data: EnrichmentData = {};
 
-  /** Fetch a JSON endpoint, applying the rate limit and recording failures as warnings. */
-  const get = async (url: string): Promise<unknown | undefined> => {
+  const today = new Date().toISOString().slice(0, 10);
+  /** Cache a successful (possibly sparse) enrichment under a key. */
+  const writePositive = (key: string): void => {
+    options.cache[key] = { fetchedAt: today, lookupKey: key, data };
+  };
+  /** Cache a definitive 404 ("Open Library has no record") under a key. */
+  const writeNotFound = (key: string): void => {
+    options.cache[key] = { fetchedAt: today, lookupKey: key, data: {}, notFound: true };
+  };
+
+  type Fetched = { ok: true; data: unknown } | { ok: false; notFound: boolean };
+
+  /**
+   * Fetch a JSON endpoint with the shared rate limit. A 404 is a definitive
+   * "not found": it returns `{ ok: false, notFound: true }` without a warning
+   * or setting anyFailure, because what a 404 means depends on the caller (a
+   * primary lookup caches it as a dead end; a secondary lookup just yields no
+   * extra data). Transport errors, other non-2xx, and parse failures push a
+   * warning and set anyFailure so the positive cache is skipped and the next
+   * build retries.
+   */
+  const fetchJson = async (url: string): Promise<Fetched> => {
     const now = Date.now();
     if (now < rateLimiter.nextAllowedAt) {
       await sleep(rateLimiter.nextAllowedAt - now);
@@ -480,111 +524,173 @@ export async function enrich(entry: ReadEntry, options: EnrichOptions): Promise<
       const message = error instanceof Error ? error.message : String(error);
       warnings.push(`Entry '${label}': failed to reach Open Library (${message})`);
       anyFailure = true;
-      return undefined;
+      return { ok: false, notFound: false };
+    }
+    if (response.status === 404) {
+      return { ok: false, notFound: true };
     }
     if (!response.ok) {
+      // Non-404 HTTP failure. The orchestrator's isTransportFailure() matches
+      // this "returned {status}" template (and excludes 404); keep them in sync.
       warnings.push(`Entry '${label}': Open Library returned ${response.status} for ${url}`);
       anyFailure = true;
-      return undefined;
+      return { ok: false, notFound: false };
     }
     try {
-      return await response.json();
+      return { ok: true, data: await response.json() };
     } catch {
       warnings.push(`Entry '${label}': Open Library returned an unparseable response for ${url}`);
       anyFailure = true;
-      return undefined;
+      return { ok: false, notFound: false };
     }
   };
 
-  /** Fetch a work and apply its subjects; record the work OLID into the data. */
+  /** Fetch a work and apply its subjects. Secondary lookup; a miss is non-fatal. */
   const fetchWork = async (workOlid: string): Promise<void> => {
-    const workData = await get(`${OPEN_LIBRARY}/works/${workOlid}.json`);
-    if (workData === undefined) {
+    const result = await fetchJson(`${OPEN_LIBRARY}/works/${workOlid}.json`);
+    if (!result.ok) {
       return;
     }
     data.olid = workOlid;
-    const subjects = asSubjects(workData);
+    const subjects = asSubjects(result.data);
     if (data.subjects === undefined && subjects !== undefined) {
       data.subjects = subjects;
     }
   };
 
-  /** Fetch a work's editions list, pick a representative edition, and apply it. */
+  /** Fetch a work's editions list and apply a representative edition. Secondary; a miss is non-fatal. */
   const fetchRepresentativeEdition = async (workOlid: string): Promise<void> => {
-    const editionsData = await get(`${OPEN_LIBRARY}/works/${workOlid}/editions.json`);
-    if (editionsData === undefined) {
+    const result = await fetchJson(`${OPEN_LIBRARY}/works/${workOlid}/editions.json`);
+    if (!result.ok) {
       return;
     }
-    const picked = pickEdition(asEditionsList(editionsData), preferences, entry.format);
+    const picked = pickEdition(asEditionsList(result.data), preferences, entry.format);
     if (picked !== undefined) {
       applyEdition(picked, data);
     }
   };
 
+  /**
+   * Run the title+author search, applying any matched doc to `data`. Returns
+   * 'found' (a doc matched and was applied), 'empty' (a clean response with no
+   * usable doc: the book is not in Open Library), or 'failed' (a transport/HTTP/
+   * parse problem already warned; leave the cache untouched for a retry). The
+   * caller pushes the verify-this warning, since the wording differs between a
+   * primary search and an ISBN-404 fallback.
+   */
+  const searchTitleAuthor = async (): Promise<'found' | 'empty' | 'failed'> => {
+    const url =
+      `${OPEN_LIBRARY}/search.json?title=${encodeURIComponent(entry.title)}` +
+      `&author=${encodeURIComponent(entry.author)}&limit=1`;
+    const result = await fetchJson(url);
+    if (!result.ok) {
+      return result.notFound ? 'empty' : 'failed';
+    }
+    const doc = asSearchDoc(result.data);
+    if (doc === undefined) {
+      return 'empty';
+    }
+    if (doc.subjects !== undefined) {
+      data.subjects = doc.subjects;
+    }
+    if (doc.workOlid !== undefined) {
+      data.olid = doc.workOlid;
+      await fetchRepresentativeEdition(doc.workOlid);
+    }
+    if (data.coverUrl === undefined && doc.coverId !== undefined) {
+      data.coverUrl = coverUrlFromId(doc.coverId);
+    }
+    return 'found';
+  };
+
+  const noRecord = `Entry '${label}': Open Library has no record for ${lookupKey}`;
+
   if (isNonEmpty(entry.olid)) {
     const olid = normalizeOlid(entry.olid);
-    if (olid.endsWith('W')) {
-      // Work OLID: fetch the work for subjects, then a representative edition.
-      await fetchWork(olid);
-      await fetchRepresentativeEdition(olid);
-    } else {
-      // Edition OLID: fetch the edition, then the linked work for subjects.
-      const editionData = await get(`${OPEN_LIBRARY}/books/${olid}.json`);
-      if (editionData !== undefined) {
-        const edition = asEdition(editionData);
+    const url = olid.endsWith('W')
+      ? `${OPEN_LIBRARY}/works/${olid}.json`
+      : `${OPEN_LIBRARY}/books/${olid}.json`;
+    const result = await fetchJson(url);
+    if (result.ok) {
+      if (olid.endsWith('W')) {
+        // Work OLID: subjects from the work, then a representative edition.
+        data.olid = olid;
+        const subjects = asSubjects(result.data);
+        if (subjects !== undefined) {
+          data.subjects = subjects;
+        }
+        await fetchRepresentativeEdition(olid);
+      } else {
+        // Edition OLID: the edition, then the linked work for subjects.
+        const edition = asEdition(result.data);
         applyEdition(edition, data);
         const workOlid = workOlidFromEdition(edition);
         if (workOlid !== undefined) {
           await fetchWork(workOlid);
         }
       }
+      if (!anyFailure) {
+        writePositive(lookupKey);
+      }
+    } else if (result.notFound) {
+      warnings.push(noRecord);
+      writeNotFound(lookupKey);
     }
+    // Transport/HTTP/parse failure: already warned; leave the cache for a retry.
   } else if (isNonEmpty(entry.isbn)) {
-    // ISBN: fetch the edition, then the linked work for subjects.
     const isbn = normalizeIsbn(entry.isbn);
-    const editionData = await get(`${OPEN_LIBRARY}/isbn/${isbn}.json`);
-    if (editionData !== undefined) {
-      const edition = asEdition(editionData);
+    const result = await fetchJson(`${OPEN_LIBRARY}/isbn/${isbn}.json`);
+    if (result.ok) {
+      const edition = asEdition(result.data);
       applyEdition(edition, data);
       const workOlid = workOlidFromEdition(edition);
       if (workOlid !== undefined) {
         await fetchWork(workOlid);
       }
-    }
-  } else {
-    // Search by title + author, then fetch a representative edition.
-    const url =
-      `${OPEN_LIBRARY}/search.json?title=${encodeURIComponent(entry.title)}` +
-      `&author=${encodeURIComponent(entry.author)}&limit=1`;
-    const searchData = await get(url);
-    if (searchData !== undefined) {
-      const doc = asSearchDoc(searchData);
-      if (doc !== undefined) {
-        warnings.push(
-          `Entry '${label}': matched by fuzzy title+author search; verify the result and consider adding an olid override`,
-        );
-        if (doc.subjects !== undefined) {
-          data.subjects = doc.subjects;
+      if (!anyFailure) {
+        writePositive(lookupKey);
+      }
+    } else if (result.notFound) {
+      // The exact ISBN is not in Open Library. Libby ships audiobook ISBNs that
+      // Open Library rarely indexes, so fall back to title+author when we have
+      // both. The two writes carry a dual intent, kept side by side: the entity
+      // is cached under its title-author key, and the ISBN lookup is remembered
+      // as a dead end so future builds skip it.
+      if (hasTitleAndAuthor) {
+        const fallbackKey = `title-author:${hashTitleAuthor(entry.title, entry.author)}`;
+        const outcome = await searchTitleAuthor();
+        if (outcome === 'found') {
+          warnings.push(
+            `Entry '${label}': ISBN not found in Open Library; fell back to title+author search`,
+          );
+          if (!anyFailure) {
+            writePositive(fallbackKey);
+          }
+          writeNotFound(lookupKey);
+        } else if (outcome === 'empty') {
+          warnings.push(noRecord);
+          writeNotFound(lookupKey);
+          writeNotFound(fallbackKey);
         }
-        if (doc.workOlid !== undefined) {
-          data.olid = doc.workOlid;
-          await fetchRepresentativeEdition(doc.workOlid);
-        }
-        if (data.coverUrl === undefined && doc.coverId !== undefined) {
-          data.coverUrl = coverUrlFromId(doc.coverId);
-        }
+        // outcome 'failed': transport problem on the fallback; leave for a retry.
+      } else {
+        warnings.push(noRecord);
+        writeNotFound(lookupKey);
       }
     }
-  }
-
-  // Write the cache only when nothing in the sequence failed. Partial-but-200 results
-  // are cached (retrying will not help); transport/HTTP failures are not (next build retries).
-  if (!anyFailure) {
-    options.cache[lookupKey] = {
-      fetchedAt: new Date().toISOString().slice(0, 10),
-      lookupKey,
-      data,
-    };
+  } else {
+    const outcome = await searchTitleAuthor();
+    if (outcome === 'found') {
+      warnings.push(
+        `Entry '${label}': matched by fuzzy title+author search; verify the result and consider adding an olid override`,
+      );
+      if (!anyFailure) {
+        writePositive(lookupKey);
+      }
+    } else if (outcome === 'empty') {
+      warnings.push(noRecord);
+      writeNotFound(lookupKey);
+    }
   }
 
   return { entry: mergeEnrichment(entry, data), warnings };

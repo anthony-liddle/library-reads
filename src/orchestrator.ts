@@ -282,14 +282,28 @@ function computeSortDate(entry: ReadEntry): string {
   return entry.borrowedAt ?? '';
 }
 
-/** Count the warnings that signal a transport/HTTP failure (not fuzzy match, no path, etc.). */
+/**
+ * Whether a warning signals a transport/HTTP failure (Open Library failing to
+ * answer), as opposed to a definitive 404 ("not found"), a fuzzy match, or a
+ * missing enrichment path. A 404 is a clean answer, not unavailability, so it
+ * must NOT count toward the rollup. The enricher reports a primary 404 as
+ * "...has no record for..." (not matched here), but a secondary 404 can still
+ * surface as "returned 404", so the status matcher explicitly excludes 404.
+ */
+function isTransportFailure(warning: string): boolean {
+  if (warning.includes('failed to reach Open Library')) {
+    return true;
+  }
+  if (warning.includes('Open Library returned an unparseable response')) {
+    return true;
+  }
+  const httpMatch = /Open Library returned (\d+) for/.exec(warning);
+  return httpMatch !== null && httpMatch[1] !== '404';
+}
+
+/** Count the warnings that signal a transport/HTTP failure (excludes 404, fuzzy match, no path). */
 function countTransportFailures(warnings: string[]): number {
-  return warnings.filter(
-    (w) =>
-      w.includes('failed to reach Open Library') ||
-      w.includes('Open Library returned an unparseable response') ||
-      /Open Library returned \d+ for/.test(w),
-  ).length;
+  return warnings.filter(isTransportFailure).length;
 }
 
 /**
