@@ -1012,6 +1012,202 @@ describe('getReads: ISBN 404 title+author fallback', () => {
   });
 });
 
+describe('getReads: matchQuality field', () => {
+  const findEntry = (
+    entries: { title: string; matchQuality?: 'exact' | 'fuzzy' | 'unmatched' }[],
+    title: string,
+  ) => entries.find((e) => e.title === title);
+
+  it("sets 'exact' for an entry enriched by ISBN", async () => {
+    const fn = vi.fn(async (input: RequestInfo | URL): Promise<Response> => {
+      return String(input).includes('/isbn/')
+        ? json({ number_of_pages: 200, covers: [1] })
+        : json({});
+    });
+    const result = await getReads({
+      libby: {
+        content: libbyCsv({
+          title: 'A',
+          isbn: '9780000000001',
+          timestamp: 'January 1, 2024 10:30',
+        }),
+      },
+      userAgent: USER_AGENT,
+      fetchImpl: fn as unknown as typeof fetch,
+      rateLimitMs: 0,
+    });
+    expect(findEntry(result.entries, 'A')?.matchQuality).toBe('exact');
+  });
+
+  it("sets 'exact' for an entry enriched by OLID", async () => {
+    const fn = vi.fn(async (input: RequestInfo | URL): Promise<Response> => {
+      return String(input).includes('books/OL1M') ? json({ number_of_pages: 100 }) : json({});
+    });
+    const result = await getReads({
+      extras: {
+        content:
+          '- olid: OL1M\n  title: A\n  author: X\n  status: finished\n  finishedAt: "2024-01-01"',
+        format: 'yaml',
+      },
+      userAgent: USER_AGENT,
+      fetchImpl: fn as unknown as typeof fetch,
+      rateLimitMs: 0,
+    });
+    expect(findEntry(result.entries, 'A')?.matchQuality).toBe('exact');
+  });
+
+  it("sets 'fuzzy' for an entry enriched by title+author search", async () => {
+    const fn = vi.fn(async (input: RequestInfo | URL): Promise<Response> => {
+      return String(input).includes('search.json')
+        ? json({ docs: [{ key: '/works/OL1W' }] })
+        : json({});
+    });
+    const result = await getReads({
+      libby: { content: libbyCsv({ title: 'A', author: 'X', timestamp: 'January 1, 2024 10:30' }) },
+      userAgent: USER_AGENT,
+      fetchImpl: fn as unknown as typeof fetch,
+      rateLimitMs: 0,
+    });
+    expect(findEntry(result.entries, 'A')?.matchQuality).toBe('fuzzy');
+  });
+
+  it("sets 'fuzzy' for an entry enriched by ISBN-404 fallback", async () => {
+    const fn = vi.fn(async (input: RequestInfo | URL): Promise<Response> => {
+      const url = String(input);
+      if (url.includes('/isbn/')) return json({}, 404);
+      if (url.includes('search.json')) return json({ docs: [{ key: '/works/OL1W' }] });
+      return json({});
+    });
+    const result = await getReads({
+      libby: {
+        content: libbyCsv({
+          title: 'A',
+          author: 'X',
+          isbn: '9780000000001',
+          timestamp: 'January 1, 2024 10:30',
+        }),
+      },
+      userAgent: USER_AGENT,
+      fetchImpl: fn as unknown as typeof fetch,
+      rateLimitMs: 0,
+    });
+    expect(findEntry(result.entries, 'A')?.matchQuality).toBe('fuzzy');
+  });
+
+  it("sets 'unmatched' for an entry where every lookup 404'd", async () => {
+    const fn = vi.fn(async (): Promise<Response> => json({}, 404));
+    const result = await getReads({
+      libby: {
+        content: libbyCsv({
+          title: 'A',
+          isbn: '9780000000001',
+          timestamp: 'January 1, 2024 10:30',
+        }),
+      },
+      userAgent: USER_AGENT,
+      fetchImpl: fn as unknown as typeof fetch,
+      rateLimitMs: 0,
+    });
+    expect(findEntry(result.entries, 'A')?.matchQuality).toBe('unmatched');
+  });
+
+  it('leaves matchQuality undefined when skipEnrichment is true', async () => {
+    const result = await getReads({
+      libby: {
+        content: libbyCsv({
+          title: 'A',
+          isbn: '9780000000001',
+          timestamp: 'January 1, 2024 10:30',
+        }),
+      },
+      userAgent: USER_AGENT,
+      skipEnrichment: true,
+    });
+    expect(findEntry(result.entries, 'A')?.matchQuality).toBeUndefined();
+  });
+
+  it('preserves matchQuality from a cache hit', async () => {
+    const cachePath = join(tmp, 'cache.json');
+    const cache: Cache = {
+      'isbn:9780000000001': {
+        fetchedAt: new Date().toISOString().slice(0, 10),
+        lookupKey: 'isbn:9780000000001',
+        data: { pageCount: 123 },
+        matchQuality: 'exact',
+      },
+    };
+    writeFileSync(cachePath, JSON.stringify(cache));
+    const { fn } = throwingFetch();
+    const result = await getReads({
+      libby: {
+        content: libbyCsv({
+          title: 'A',
+          isbn: '9780000000001',
+          timestamp: 'January 1, 2024 10:30',
+        }),
+      },
+      cache: { path: cachePath },
+      userAgent: USER_AGENT,
+      fetchImpl: fn as unknown as typeof fetch,
+      rateLimitMs: 0,
+    });
+    expect(findEntry(result.entries, 'A')?.matchQuality).toBe('exact');
+  });
+
+  it('leaves matchQuality undefined for a cache hit on a pre-existing entry without the field', async () => {
+    const cachePath = join(tmp, 'cache.json');
+    const cache: Cache = {
+      'isbn:9780000000001': {
+        fetchedAt: new Date().toISOString().slice(0, 10),
+        lookupKey: 'isbn:9780000000001',
+        data: { pageCount: 123 },
+      },
+    };
+    writeFileSync(cachePath, JSON.stringify(cache));
+    const { fn } = throwingFetch();
+    const result = await getReads({
+      libby: {
+        content: libbyCsv({
+          title: 'A',
+          isbn: '9780000000001',
+          timestamp: 'January 1, 2024 10:30',
+        }),
+      },
+      cache: { path: cachePath },
+      userAgent: USER_AGENT,
+      fetchImpl: fn as unknown as typeof fetch,
+      rateLimitMs: 0,
+    });
+    expect(findEntry(result.entries, 'A')?.matchQuality).toBeUndefined();
+  });
+
+  it('persists matchQuality to a freshly written cache entry', async () => {
+    const cachePath = join(tmp, 'cache.json');
+    const fn = vi.fn(async (input: RequestInfo | URL): Promise<Response> => {
+      return String(input).includes('/isbn/')
+        ? json({ number_of_pages: 200, covers: [1] })
+        : json({});
+    });
+    await getReads({
+      libby: {
+        content: libbyCsv({
+          title: 'A',
+          isbn: '9780000000001',
+          timestamp: 'January 1, 2024 10:30',
+        }),
+      },
+      cache: { path: cachePath },
+      userAgent: USER_AGENT,
+      fetchImpl: fn as unknown as typeof fetch,
+      rateLimitMs: 0,
+    });
+    const written: Record<string, { matchQuality?: string }> = JSON.parse(
+      readFileSync(cachePath, 'utf-8'),
+    );
+    expect(written['isbn:9780000000001']?.matchQuality).toBe('exact');
+  });
+});
+
 describe('getReads: lastEntryDate', () => {
   it('equals the max sortDate of the returned entries', async () => {
     const result = await getReads({

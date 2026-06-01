@@ -1334,3 +1334,61 @@ describe('enrich: ISBN 404 fallback to title+author search', () => {
     expect(cache[taKey]?.notFound).toBe(true);
   });
 });
+
+describe('enrich: matchQuality on cache entries', () => {
+  it("writes matchQuality 'exact' for a successful ISBN lookup", async () => {
+    const { fn } = routerFetch({
+      '/isbn/9780374275631.json': { body: editionFixture({ works: [{ key: '/works/OL1W' }] }) },
+      'works/OL1W.json': { body: { subjects: ['Trees'] } },
+    });
+    const cache: Cache = {};
+    await enrich(makeEntry({ isbn: '9780374275631' }), {
+      userAgent: USER_AGENT,
+      cache,
+      fetchImpl: fn,
+      rateLimitMs: 0,
+    });
+    expect(cache['isbn:9780374275631']?.matchQuality).toBe('exact');
+  });
+
+  it("writes matchQuality 'fuzzy' for a successful title+author search", async () => {
+    const { fn } = routerFetch({
+      'search.json': { body: { docs: [{ key: '/works/OL1W', cover_i: 99 }] } },
+      'editions.json': { body: { entries: [editionFixture()] } },
+    });
+    const cache: Cache = {};
+    await enrich(makeEntry(), { userAgent: USER_AGENT, cache, fetchImpl: fn, rateLimitMs: 0 });
+    const key = `title-author:${hashTitleAuthor('The Overstory', 'Richard Powers')}`;
+    expect(cache[key]?.matchQuality).toBe('fuzzy');
+  });
+
+  it("writes matchQuality 'unmatched' on a notFound cache entry", async () => {
+    const { fn } = routerFetch({ '/isbn/9780374275631.json': { status: 404 } });
+    const cache: Cache = {};
+    await enrich(makeEntry({ author: '', isbn: '9780374275631' }), {
+      userAgent: USER_AGENT,
+      cache,
+      fetchImpl: fn,
+      rateLimitMs: 0,
+    });
+    expect(cache['isbn:9780374275631']?.matchQuality).toBe('unmatched');
+  });
+
+  it("writes 'fuzzy' under the title-author key and 'unmatched' under the ISBN key on a fallback", async () => {
+    const { fn } = routerFetch({
+      '/isbn/9780374275631.json': { status: 404 },
+      'search.json': { body: { docs: [{ key: '/works/OL1W', cover_i: 99 }] } },
+      'editions.json': { body: { entries: [editionFixture()] } },
+    });
+    const cache: Cache = {};
+    await enrich(makeEntry({ isbn: '9780374275631' }), {
+      userAgent: USER_AGENT,
+      cache,
+      fetchImpl: fn,
+      rateLimitMs: 0,
+    });
+    const taKey = `title-author:${hashTitleAuthor('The Overstory', 'Richard Powers')}`;
+    expect(cache[taKey]?.matchQuality).toBe('fuzzy');
+    expect(cache['isbn:9780374275631']?.matchQuality).toBe('unmatched');
+  });
+});

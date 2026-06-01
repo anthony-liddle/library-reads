@@ -472,6 +472,11 @@ async function enrichAll(
       maxAgeDays: options.cache?.maxAgeDays,
       bust: options.cache?.bust,
     });
+    // Copy the match quality onto the entry. Undefined (transport failure, or a
+    // cache hit from an entry written before the field existed) leaves it unset.
+    if (result.matchQuality !== undefined) {
+      result.entry.matchQuality = result.matchQuality;
+    }
     enriched.push(result.entry);
     warnings.push(...result.warnings);
 
