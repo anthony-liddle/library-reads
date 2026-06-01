@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { EditionPreferences } from './enrich.js';
 import {
   type Cache,
@@ -784,19 +784,34 @@ describe('enrich: title and author preservation', () => {
 });
 
 describe('enrich: rate limiting', () => {
-  it('waits at least rateLimitMs between sequential fetch calls', async () => {
+  // Fake timers make these assertions deterministic: the rate limiter sets
+  // nextAllowedAt to `Date.now() + rateLimitMs` and sleeps via setTimeout, so a
+  // mocked clock gives exact request timestamps and budget values. The previous
+  // assertions measured real wall-clock deltas, which quantize on Date.now()'s
+  // millisecond resolution (a 40ms sleep can read back as 39) and flaked under
+  // parallel-test CPU load.
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('waits rateLimitMs between sequential fetch calls', async () => {
     const { fn, calls } = routerFetch({
       '/isbn/': { body: editionFixture({ works: [{ key: '/works/OL1W' }] }) },
       'works/OL1W.json': { body: { subjects: ['Trees'] } },
     });
-    await enrich(makeEntry({ isbn: '9780374275631' }), {
+    const promise = enrich(makeEntry({ isbn: '9780374275631' }), {
       userAgent: USER_AGENT,
       cache: {},
       fetchImpl: fn,
       rateLimitMs: 40,
     });
+    await vi.runAllTimersAsync();
+    await promise;
     expect(calls).toHaveLength(2);
-    expect(calls[1].at - calls[0].at).toBeGreaterThanOrEqual(40);
+    expect(calls[1].at - calls[0].at).toBe(40);
   });
 
   it('respects a custom rateLimitMs', async () => {
@@ -804,13 +819,15 @@ describe('enrich: rate limiting', () => {
       '/isbn/': { body: editionFixture({ works: [{ key: '/works/OL1W' }] }) },
       'works/OL1W.json': { body: { subjects: ['Trees'] } },
     });
-    await enrich(makeEntry({ isbn: '9780374275631' }), {
+    const promise = enrich(makeEntry({ isbn: '9780374275631' }), {
       userAgent: USER_AGENT,
       cache: {},
       fetchImpl: fn,
       rateLimitMs: 80,
     });
-    expect(calls[1].at - calls[0].at).toBeGreaterThanOrEqual(80);
+    await vi.runAllTimersAsync();
+    await promise;
+    expect(calls[1].at - calls[0].at).toBe(80);
   });
 
   it('does not wait before the first fetch', async () => {
@@ -819,77 +836,92 @@ describe('enrich: rate limiting', () => {
       'works/OL1W.json': { body: { subjects: ['Trees'] } },
     });
     const start = Date.now();
-    await enrich(makeEntry({ isbn: '9780374275631' }), {
+    const promise = enrich(makeEntry({ isbn: '9780374275631' }), {
       userAgent: USER_AGENT,
       cache: {},
       fetchImpl: fn,
       rateLimitMs: 200,
     });
-    expect(calls[0].at - start).toBeLessThan(200);
+    await vi.runAllTimersAsync();
+    await promise;
+    // The first request fires at the starting instant; only later requests wait.
+    expect(calls[0].at).toBe(start);
   });
 
   it('shares state across two sequential calls when rateLimiterState is provided', async () => {
-    const { fn, calls } = routerFetch({
-      '/isbn/': { body: editionFixture() },
-    });
+    const { fn, calls } = routerFetch({ '/isbn/': { body: editionFixture() } });
     const rateLimiterState = { nextAllowedAt: 0 };
-    await enrich(makeEntry({ isbn: '9780374275631' }), {
+    const start = Date.now();
+
+    const first = enrich(makeEntry({ isbn: '9780374275631' }), {
       userAgent: USER_AGENT,
       cache: {},
       fetchImpl: fn,
       rateLimitMs: 40,
       rateLimiterState,
     });
-    await enrich(makeEntry({ isbn: '9780000000000' }), {
+    await vi.runAllTimersAsync();
+    await first;
+    // The first request fires immediately and advances the shared budget once.
+    expect(rateLimiterState.nextAllowedAt).toBe(start + 40);
+
+    const second = enrich(makeEntry({ isbn: '9780000000000' }), {
       userAgent: USER_AGENT,
       cache: {},
       fetchImpl: fn,
       rateLimitMs: 40,
       rateLimiterState,
     });
-    // The second call's first request must respect the budget set by the
-    // first call's last request.
+    await vi.runAllTimersAsync();
+    await second;
+    // The second call inherits the budget: it waits one interval before its
+    // request, then advances the budget again.
     expect(calls).toHaveLength(2);
-    expect(calls[1].at - calls[0].at).toBeGreaterThanOrEqual(40);
+    expect(calls[1].at - calls[0].at).toBe(40);
+    expect(rateLimiterState.nextAllowedAt).toBe(start + 80);
   });
 
   it('does NOT share state across calls when rateLimiterState is omitted', async () => {
-    const { fn, calls } = routerFetch({
-      '/isbn/': { body: editionFixture() },
-    });
-    await enrich(makeEntry({ isbn: '9780374275631' }), {
+    const { fn, calls } = routerFetch({ '/isbn/': { body: editionFixture() } });
+
+    const first = enrich(makeEntry({ isbn: '9780374275631' }), {
       userAgent: USER_AGENT,
       cache: {},
       fetchImpl: fn,
       rateLimitMs: 200,
     });
-    await enrich(makeEntry({ isbn: '9780000000000' }), {
+    await vi.runAllTimersAsync();
+    await first;
+
+    const second = enrich(makeEntry({ isbn: '9780000000000' }), {
       userAgent: USER_AGENT,
       cache: {},
       fetchImpl: fn,
       rateLimitMs: 200,
     });
-    // Each call starts a fresh per-call limiter, so the second call's first
-    // request does not wait for the first call's budget.
+    await vi.runAllTimersAsync();
+    await second;
+    // Each call starts a fresh per-call limiter, so neither first request waits;
+    // both fire at the same (frozen) instant.
     expect(calls).toHaveLength(2);
-    expect(calls[1].at - calls[0].at).toBeLessThan(200);
+    expect(calls[1].at - calls[0].at).toBe(0);
   });
 
   it('mutates the rateLimiterState object in place', async () => {
-    const { fn } = routerFetch({
-      '/isbn/': { body: editionFixture() },
-    });
+    const { fn } = routerFetch({ '/isbn/': { body: editionFixture() } });
     const rateLimiterState = { nextAllowedAt: 0 };
-    const before = Date.now();
-    await enrich(makeEntry({ isbn: '9780374275631' }), {
+    const start = Date.now();
+    const promise = enrich(makeEntry({ isbn: '9780374275631' }), {
       userAgent: USER_AGENT,
       cache: {},
       fetchImpl: fn,
       rateLimitMs: 40,
       rateLimiterState,
     });
-    // The caller sees the updated budget after enrich returns.
-    expect(rateLimiterState.nextAllowedAt).toBeGreaterThanOrEqual(before);
+    await vi.runAllTimersAsync();
+    await promise;
+    // The caller sees the advanced budget after enrich returns.
+    expect(rateLimiterState.nextAllowedAt).toBe(start + 40);
   });
 });
 
