@@ -1,0 +1,47 @@
+name: CI
+
+# Validates every push to main and every pull request. This "verify" job is the
+# check branch protection should require; it never publishes anything. The steps
+# after install mirror the local pre-publish gauntlet exactly.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  verify:
+    name: verify
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Check
+        run: pnpm check
+
+      - name: Test
+        run: pnpm test
+
+      - name: Build
+        run: pnpm build
+
+      - name: Publint
+        run: pnpm exec publint
+
+      - name: Are the types wrong?
+        run: pnpm exec attw --pack . --profile esm-only
