@@ -27,6 +27,13 @@ export interface CacheEntry {
    * a key forces a refetch regardless.
    */
   notFound?: boolean;
+  /**
+   * How this entry was matched ('exact' | 'fuzzy' | 'unmatched'). Written on
+   * every cache entry created from now on; optional because entries written
+   * before this field existed lack it (a cache hit on such an entry yields an
+   * undefined matchQuality, and we do not refetch just to populate it).
+   */
+  matchQuality?: 'exact' | 'fuzzy' | 'unmatched';
 }
 
 /** The full cache file shape. Keys are the lookupKey values. */
@@ -103,6 +110,14 @@ export interface EnrichResult {
   entry: ReadEntry;
   /** Soft failures (404 from Open Library, fuzzy match fallback, missing fields, etc.). */
   warnings: string[];
+  /**
+   * How the entry was matched: 'exact' (ISBN/OLID), 'fuzzy' (title+author
+   * search, primary or fallback), or 'unmatched' (no match at all). Undefined
+   * when a transport failure left the outcome unknown, or when a cache hit came
+   * from an entry written before this field existed. The orchestrator copies a
+   * defined value onto the returned entry's `matchQuality`.
+   */
+  matchQuality?: 'exact' | 'fuzzy' | 'unmatched';
 }
 
 /**
@@ -455,7 +470,7 @@ export async function enrich(entry: ReadEntry, options: EnrichOptions): Promise<
     lookupKey = `title-author:${hashTitleAuthor(entry.title, entry.author)}`;
   } else {
     warnings.push(`Entry '${label}': no enrichment path (missing olid, isbn, and title+author)`);
-    return { entry, warnings };
+    return { entry, warnings, matchQuality: 'unmatched' };
   }
 
   const hasTitleAndAuthor = isNonEmpty(entry.title) && isNonEmpty(entry.author);
@@ -475,10 +490,18 @@ export async function enrich(entry: ReadEntry, options: EnrichOptions): Promise<
         const fallbackKey = `title-author:${hashTitleAuthor(entry.title, entry.author)}`;
         const fallback = options.cache[fallbackKey];
         if (usable(fallback)) {
-          return { entry: mergeEnrichment(entry, fallback.data), warnings };
+          return {
+            entry: mergeEnrichment(entry, fallback.data),
+            warnings,
+            matchQuality: fallback.matchQuality,
+          };
         }
       }
-      return { entry: mergeEnrichment(entry, cached.data), warnings };
+      return {
+        entry: mergeEnrichment(entry, cached.data),
+        warnings,
+        matchQuality: cached.matchQuality,
+      };
     }
   }
 
@@ -491,12 +514,18 @@ export async function enrich(entry: ReadEntry, options: EnrichOptions): Promise<
 
   const today = new Date().toISOString().slice(0, 10);
   /** Cache a successful (possibly sparse) enrichment under a key. */
-  const writePositive = (key: string): void => {
-    options.cache[key] = { fetchedAt: today, lookupKey: key, data };
+  const writePositive = (key: string, quality: 'exact' | 'fuzzy'): void => {
+    options.cache[key] = { fetchedAt: today, lookupKey: key, data, matchQuality: quality };
   };
   /** Cache a definitive 404 ("Open Library has no record") under a key. */
   const writeNotFound = (key: string): void => {
-    options.cache[key] = { fetchedAt: today, lookupKey: key, data: {}, notFound: true };
+    options.cache[key] = {
+      fetchedAt: today,
+      lookupKey: key,
+      data: {},
+      notFound: true,
+      matchQuality: 'unmatched',
+    };
   };
 
   type Fetched = { ok: true; data: unknown } | { ok: false; notFound: boolean };
@@ -604,6 +633,10 @@ export async function enrich(entry: ReadEntry, options: EnrichOptions): Promise<
   };
 
   const noRecord = `Entry '${label}': Open Library has no record for ${lookupKey}`;
+  // The entry's overall match quality, distinct from any per-key cache flag. A
+  // transport failure leaves it undefined: we genuinely don't know yet, and the
+  // next build retries.
+  let matchQuality: 'exact' | 'fuzzy' | 'unmatched' | undefined;
 
   if (isNonEmpty(entry.olid)) {
     const olid = normalizeOlid(entry.olid);
@@ -629,12 +662,14 @@ export async function enrich(entry: ReadEntry, options: EnrichOptions): Promise<
           await fetchWork(workOlid);
         }
       }
+      matchQuality = 'exact';
       if (!anyFailure) {
-        writePositive(lookupKey);
+        writePositive(lookupKey, 'exact');
       }
     } else if (result.notFound) {
       warnings.push(noRecord);
       writeNotFound(lookupKey);
+      matchQuality = 'unmatched';
     }
     // Transport/HTTP/parse failure: already warned; leave the cache for a retry.
   } else if (isNonEmpty(entry.isbn)) {
@@ -647,8 +682,9 @@ export async function enrich(entry: ReadEntry, options: EnrichOptions): Promise<
       if (workOlid !== undefined) {
         await fetchWork(workOlid);
       }
+      matchQuality = 'exact';
       if (!anyFailure) {
-        writePositive(lookupKey);
+        writePositive(lookupKey, 'exact');
       }
     } else if (result.notFound) {
       // The exact ISBN is not in Open Library. Libby ships audiobook ISBNs that
@@ -663,19 +699,22 @@ export async function enrich(entry: ReadEntry, options: EnrichOptions): Promise<
           warnings.push(
             `Entry '${label}': ISBN not found in Open Library; fell back to title+author search`,
           );
+          matchQuality = 'fuzzy';
           if (!anyFailure) {
-            writePositive(fallbackKey);
+            writePositive(fallbackKey, 'fuzzy');
           }
           writeNotFound(lookupKey);
         } else if (outcome === 'empty') {
           warnings.push(noRecord);
           writeNotFound(lookupKey);
           writeNotFound(fallbackKey);
+          matchQuality = 'unmatched';
         }
         // outcome 'failed': transport problem on the fallback; leave for a retry.
       } else {
         warnings.push(noRecord);
         writeNotFound(lookupKey);
+        matchQuality = 'unmatched';
       }
     }
   } else {
@@ -684,14 +723,16 @@ export async function enrich(entry: ReadEntry, options: EnrichOptions): Promise<
       warnings.push(
         `Entry '${label}': matched by fuzzy title+author search; verify the result and consider adding an olid override`,
       );
+      matchQuality = 'fuzzy';
       if (!anyFailure) {
-        writePositive(lookupKey);
+        writePositive(lookupKey, 'fuzzy');
       }
     } else if (outcome === 'empty') {
       warnings.push(noRecord);
       writeNotFound(lookupKey);
+      matchQuality = 'unmatched';
     }
   }
 
-  return { entry: mergeEnrichment(entry, data), warnings };
+  return { entry: mergeEnrichment(entry, data), warnings, matchQuality };
 }

@@ -54,6 +54,22 @@ export interface ReadEntry {
   subjects?: string[];
 
   /**
+   * How this entry's enrichment data was matched against Open Library:
+   *
+   * - `exact`: matched by ISBN or OLID.
+   * - `fuzzy`: matched by title+author search, either because the entry had no
+   *   ISBN/OLID to begin with, or because the ISBN lookup returned 404 and we
+   *   fell back to search. Fuzzy matches are right most of the time but worth
+   *   verifying; consider providing an `olid` override in extras.yaml when wrong.
+   * - `unmatched`: no Open Library match at all. Cover and metadata are missing,
+   *   unless filled in from extras (title/author) or from the Libby fallback cover.
+   *
+   * Undefined when enrichment was skipped (`skipEnrichment: true`) or the entry
+   * pre-dates this field's introduction in a cached entry.
+   */
+  matchQuality?: 'exact' | 'fuzzy' | 'unmatched';
+
+  /**
    * The canonical date for sorting and "lately" calculations, derived from
    * status. ISO date string (YYYY-MM-DD). The orchestrator computes this.
    *
@@ -69,15 +85,22 @@ export interface ReadEntry {
   sortDate: string;
 
   // Provenance
-  /** Which parser produced this entry. Pipeline provenance, not user-facing origin. */
+  /**
+   * Which parser produced this entry. Pipeline provenance, used for debugging
+   * and merge logic. NOT for display; render `source` instead when you want to
+   * show the reader where a book came from.
+   */
   provenance: ReadSource;
   /** When true, excluded from output unless the consumer opts in. Set from extras. */
   private?: boolean;
   /**
    * Free-form origin of this read, written by the user or defaulted by the
    * orchestrator. Examples: 'library', "Powell's", 'Audible', 'borrowed from
-   * Joel'. Distinct from `provenance`, which records which parser produced
-   * the entry. The consumer page renders this when present.
+   * Joel'. This is the field a consumer page should render to the reader.
+   *
+   * Distinct from `provenance`, which records which parser produced the entry
+   * (a structural, internal value used for debugging and merge logic, not for
+   * display).
    */
   source?: string;
   /** Library system name, when known (e.g. from Libby). */
