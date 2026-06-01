@@ -953,9 +953,9 @@ describe('enrich: error handling', () => {
     expect(result.warnings.some((w) => w.includes('failed to reach Open Library'))).toBe(true);
   });
 
-  it('pushes a warning and returns the entry unchanged on HTTP 404', async () => {
+  it('returns the entry unchanged and warns when a 404 cannot fall back (no title+author)', async () => {
     const { fn } = routerFetch({ '/isbn/': { status: 404 } });
-    const entry = makeEntry({ isbn: '9780374275631' });
+    const entry = makeEntry({ title: '', author: '', isbn: '9780374275631' });
     const result = await enrich(entry, {
       userAgent: USER_AGENT,
       cache: {},
@@ -963,7 +963,7 @@ describe('enrich: error handling', () => {
       rateLimitMs: 0,
     });
     expect(result.entry).toEqual(entry);
-    expect(result.warnings.some((w) => w.includes('404'))).toBe(true);
+    expect(result.warnings.some((w) => w.includes('has no record'))).toBe(true);
   });
 
   it('pushes a warning and returns the entry unchanged on HTTP 500', async () => {
@@ -979,8 +979,8 @@ describe('enrich: error handling', () => {
     expect(result.warnings.some((w) => w.includes('500'))).toBe(true);
   });
 
-  it('does not write to cache on a fetch failure', async () => {
-    const { fn } = routerFetch({ '/isbn/': { status: 404 } });
+  it('does not write to cache on a transport failure (HTTP 500)', async () => {
+    const { fn } = routerFetch({ '/isbn/': { status: 500 } });
     const cache: Cache = {};
     await enrich(makeEntry({ isbn: '9780374275631' }), {
       userAgent: USER_AGENT,
@@ -1066,5 +1066,271 @@ describe('enrich: cache miss writes', () => {
       rateLimitMs: 0,
     });
     expect(Object.keys(cache)).toContain('isbn:9780374275631');
+  });
+});
+
+describe('enrich: negative cache (404 handling)', () => {
+  it('writes a notFound cache entry when the ISBN lookup returns 404', async () => {
+    const { fn } = routerFetch({ '/isbn/9780374275631.json': { status: 404 } });
+    const cache: Cache = {};
+    await enrich(makeEntry({ author: '', isbn: '9780374275631' }), {
+      userAgent: USER_AGENT,
+      cache,
+      fetchImpl: fn,
+      rateLimitMs: 0,
+    });
+    expect(cache['isbn:9780374275631']?.notFound).toBe(true);
+    expect(cache['isbn:9780374275631']?.data).toEqual({});
+  });
+
+  it('writes a notFound cache entry when the OLID lookup returns 404', async () => {
+    const { fn } = routerFetch({ 'works/OL1W.json': { status: 404 } });
+    const cache: Cache = {};
+    await enrich(makeEntry({ olid: 'OL1W' }), {
+      userAgent: USER_AGENT,
+      cache,
+      fetchImpl: fn,
+      rateLimitMs: 0,
+    });
+    expect(cache['olid:OL1W']?.notFound).toBe(true);
+  });
+
+  it('writes a notFound cache entry when the title+author search returns no results', async () => {
+    const { fn } = routerFetch({ 'search.json': { body: { docs: [] } } });
+    const cache: Cache = {};
+    await enrich(makeEntry(), { userAgent: USER_AGENT, cache, fetchImpl: fn, rateLimitMs: 0 });
+    const key = `title-author:${hashTitleAuthor('The Overstory', 'Richard Powers')}`;
+    expect(cache[key]?.notFound).toBe(true);
+  });
+
+  it('skips the lookup entirely on a cache hit with notFound: true', async () => {
+    const fetchImpl = vi.fn();
+    const cache: Cache = {
+      'isbn:9780374275631': {
+        fetchedAt: daysAgo(0),
+        lookupKey: 'isbn:9780374275631',
+        data: {},
+        notFound: true,
+      },
+    };
+    await enrich(makeEntry({ author: '', isbn: '9780374275631' }), {
+      userAgent: USER_AGENT,
+      cache,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      rateLimitMs: 0,
+    });
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it('emits no warning on a cache hit with notFound: true', async () => {
+    const fetchImpl = vi.fn();
+    const cache: Cache = {
+      'isbn:9780374275631': {
+        fetchedAt: daysAgo(0),
+        lookupKey: 'isbn:9780374275631',
+        data: {},
+        notFound: true,
+      },
+    };
+    const result = await enrich(makeEntry({ author: '', isbn: '9780374275631' }), {
+      userAgent: USER_AGENT,
+      cache,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      rateLimitMs: 0,
+    });
+    expect(result.warnings).toHaveLength(0);
+  });
+
+  it('emits exactly one warning naming the lookup when writing a fresh notFound entry', async () => {
+    const { fn } = routerFetch({ '/isbn/9780374275631.json': { status: 404 } });
+    const result = await enrich(makeEntry({ author: '', isbn: '9780374275631' }), {
+      userAgent: USER_AGENT,
+      cache: {},
+      fetchImpl: fn,
+      rateLimitMs: 0,
+    });
+    expect(result.warnings).toEqual([
+      "Entry 'The Overstory': Open Library has no record for isbn:9780374275631",
+    ]);
+  });
+
+  it('refetches a notFound entry older than maxAgeDays', async () => {
+    const { fn, calls } = routerFetch({ '/isbn/9780374275631.json': { status: 404 } });
+    const cache: Cache = {
+      'isbn:9780374275631': {
+        fetchedAt: daysAgo(200),
+        lookupKey: 'isbn:9780374275631',
+        data: {},
+        notFound: true,
+      },
+    };
+    await enrich(makeEntry({ author: '', isbn: '9780374275631' }), {
+      userAgent: USER_AGENT,
+      cache,
+      fetchImpl: fn,
+      rateLimitMs: 0,
+      maxAgeDays: 180,
+    });
+    expect(calls.length).toBeGreaterThan(0);
+  });
+
+  it('refetches a notFound entry whose key is in the bust list', async () => {
+    const { fn, calls } = routerFetch({ '/isbn/9780374275631.json': { status: 404 } });
+    const cache: Cache = {
+      'isbn:9780374275631': {
+        fetchedAt: daysAgo(0),
+        lookupKey: 'isbn:9780374275631',
+        data: {},
+        notFound: true,
+      },
+    };
+    await enrich(makeEntry({ author: '', isbn: '9780374275631' }), {
+      userAgent: USER_AGENT,
+      cache,
+      fetchImpl: fn,
+      rateLimitMs: 0,
+      bust: ['isbn:9780374275631'],
+    });
+    expect(calls.length).toBeGreaterThan(0);
+  });
+
+  it('does NOT mark the entry notFound when only the secondary work lookup 404s', async () => {
+    const { fn } = routerFetch({
+      '/isbn/9780374275631.json': { body: editionFixture({ works: [{ key: '/works/OL1W' }] }) },
+      'works/OL1W.json': { status: 404 },
+    });
+    const cache: Cache = {};
+    const result = await enrich(makeEntry({ isbn: '9780374275631' }), {
+      userAgent: USER_AGENT,
+      cache,
+      fetchImpl: fn,
+      rateLimitMs: 0,
+    });
+    expect(result.entry.pageCount).toBe(502);
+    expect(cache['isbn:9780374275631']?.notFound).toBeUndefined();
+    expect(cache['isbn:9780374275631']?.data.pageCount).toBe(502);
+  });
+});
+
+describe('enrich: ISBN 404 fallback to title+author search', () => {
+  const fallbackRoutes = (): Record<string, Route> => ({
+    '/isbn/9780374275631.json': { status: 404 },
+    'search.json': { body: { docs: [{ key: '/works/OL1W', cover_i: 99 }] } },
+    'editions.json': { body: { entries: [editionFixture()] } },
+  });
+
+  it('falls back to title+author search when the ISBN returns 404 and title+author are present', async () => {
+    const { fn, calls } = routerFetch(fallbackRoutes());
+    const result = await enrich(makeEntry({ isbn: '9780374275631' }), {
+      userAgent: USER_AGENT,
+      cache: {},
+      fetchImpl: fn,
+      rateLimitMs: 0,
+    });
+    expect(calls.some((c) => c.url.includes('search.json'))).toBe(true);
+    expect(result.entry.pageCount).toBe(502);
+  });
+
+  it('emits a "fell back" warning naming the entry', async () => {
+    const { fn } = routerFetch(fallbackRoutes());
+    const result = await enrich(makeEntry({ isbn: '9780374275631' }), {
+      userAgent: USER_AGENT,
+      cache: {},
+      fetchImpl: fn,
+      rateLimitMs: 0,
+    });
+    expect(result.warnings).toContainEqual(
+      "Entry 'The Overstory': ISBN not found in Open Library; fell back to title+author search",
+    );
+  });
+
+  it('caches the successful fallback result under the title-author hash key', async () => {
+    const { fn } = routerFetch(fallbackRoutes());
+    const cache: Cache = {};
+    await enrich(makeEntry({ isbn: '9780374275631' }), {
+      userAgent: USER_AGENT,
+      cache,
+      fetchImpl: fn,
+      rateLimitMs: 0,
+    });
+    const key = `title-author:${hashTitleAuthor('The Overstory', 'Richard Powers')}`;
+    expect(cache[key]).toBeDefined();
+    expect(cache[key]?.notFound).toBeUndefined();
+    expect(cache[key]?.data.pageCount).toBe(502);
+  });
+
+  it('also caches a notFound entry under the ISBN key', async () => {
+    const { fn } = routerFetch(fallbackRoutes());
+    const cache: Cache = {};
+    await enrich(makeEntry({ isbn: '9780374275631' }), {
+      userAgent: USER_AGENT,
+      cache,
+      fetchImpl: fn,
+      rateLimitMs: 0,
+    });
+    expect(cache['isbn:9780374275631']?.notFound).toBe(true);
+  });
+
+  it('skips the ISBN lookup and uses the cached fallback result on a subsequent build', async () => {
+    const cache: Cache = {};
+    const first = routerFetch(fallbackRoutes());
+    await enrich(makeEntry({ isbn: '9780374275631' }), {
+      userAgent: USER_AGENT,
+      cache,
+      fetchImpl: first.fn,
+      rateLimitMs: 0,
+    });
+    // Second build: an empty router throws on any request, proving no fetch happens.
+    const second = routerFetch({});
+    const result = await enrich(makeEntry({ isbn: '9780374275631' }), {
+      userAgent: USER_AGENT,
+      cache,
+      fetchImpl: second.fn,
+      rateLimitMs: 0,
+    });
+    expect(second.calls).toHaveLength(0);
+    expect(result.entry.pageCount).toBe(502);
+  });
+
+  it('does NOT fall back when the entry has an ISBN but no author', async () => {
+    const { fn, calls } = routerFetch({ '/isbn/9780374275631.json': { status: 404 } });
+    const result = await enrich(makeEntry({ author: '', isbn: '9780374275631' }), {
+      userAgent: USER_AGENT,
+      cache: {},
+      fetchImpl: fn,
+      rateLimitMs: 0,
+    });
+    expect(calls.every((c) => !c.url.includes('search.json'))).toBe(true);
+    expect(result.warnings.some((w) => w.includes('fell back'))).toBe(false);
+    expect(result.warnings.some((w) => w.includes('has no record'))).toBe(true);
+  });
+
+  it('does NOT fall back when the entry has an ISBN but no title', async () => {
+    const { fn, calls } = routerFetch({ '/isbn/9780374275631.json': { status: 404 } });
+    const result = await enrich(makeEntry({ title: '', isbn: '9780374275631' }), {
+      userAgent: USER_AGENT,
+      cache: {},
+      fetchImpl: fn,
+      rateLimitMs: 0,
+    });
+    expect(calls.every((c) => !c.url.includes('search.json'))).toBe(true);
+    expect(result.warnings.some((w) => w.includes('fell back'))).toBe(false);
+  });
+
+  it('caches notFound under BOTH keys when the ISBN and the fallback search both miss', async () => {
+    const { fn } = routerFetch({
+      '/isbn/9780374275631.json': { status: 404 },
+      'search.json': { body: { docs: [] } },
+    });
+    const cache: Cache = {};
+    await enrich(makeEntry({ isbn: '9780374275631' }), {
+      userAgent: USER_AGENT,
+      cache,
+      fetchImpl: fn,
+      rateLimitMs: 0,
+    });
+    const taKey = `title-author:${hashTitleAuthor('The Overstory', 'Richard Powers')}`;
+    expect(cache['isbn:9780374275631']?.notFound).toBe(true);
+    expect(cache[taKey]?.notFound).toBe(true);
   });
 });
