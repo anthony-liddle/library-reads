@@ -18,6 +18,15 @@ updates:
     schedule:
       interval: 'weekly'
     open-pull-requests-limit: 5
+    ignore:
+      # @types/node tracks the LOWEST Node this package supports, not the newest
+      # release. engines.node is ">=22", so typing against a newer major would
+      # describe APIs that do not exist on Node 22 and let code compile here
+      # that fails at runtime for a consumer on the supported floor. Minor and
+      # patch bumps within the 22 line are still welcome. Raise this deliberately
+      # if and when the engines floor moves.
+      - dependency-name: '@types/node'
+        update-types: ['version-update:semver-major']
     groups:
       production:
         dependency-type: 'production'
