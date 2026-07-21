@@ -719,6 +719,45 @@ describe('enrich: search path (title+author)', () => {
     expect(result.entry.pageCount).toBe(333);
   });
 
+  it('takes subjects from the search doc without a second work lookup', async () => {
+    const { fn, calls } = routerFetch({
+      'search.json': {
+        body: { docs: [{ key: '/works/OL1W', cover_i: 99, subject: ['Trees', 'Ecology'] }] },
+      },
+      'editions.json': { body: { entries: [editionFixture()] } },
+    });
+    const result = await enrich(makeEntry(), {
+      userAgent: USER_AGENT,
+      cache: {},
+      fetchImpl: fn,
+      rateLimitMs: 0,
+    });
+    expect(result.entry.subjects).toEqual(['Trees', 'Ecology']);
+    // The search doc already carried them, so /works/OL1W.json is never fetched.
+    expect(calls.some((c) => c.url.endsWith('works/OL1W.json'))).toBe(false);
+  });
+
+  it('keeps the search result when the follow-up editions lookup fails', async () => {
+    const { fn } = routerFetch({
+      'search.json': { body: { docs: [{ key: '/works/OL1W', cover_i: 99 }] } },
+      'editions.json': { throws: 'ECONNRESET' },
+    });
+    const cache: Cache = {};
+    const result = await enrich(makeEntry(), {
+      userAgent: USER_AGENT,
+      cache,
+      fetchImpl: fn,
+      rateLimitMs: 0,
+    });
+    // The secondary lookup is best-effort: the cover and OLID from the search
+    // survive, but the failure blocks the positive cache write so the next
+    // build retries for the page count.
+    expect(result.entry.coverUrl).toBe(coverUrlFromId(99));
+    expect(result.entry.olid).toBe('OL1W');
+    expect(result.entry.pageCount).toBeUndefined();
+    expect(cache).toEqual({});
+  });
+
   it('emits a fuzzy match warning naming the entry', async () => {
     const { fn } = routerFetch({
       'search.json': { body: { docs: [{ key: '/works/OL1W', cover_i: 99 }] } },
@@ -996,6 +1035,32 @@ describe('enrich: error handling', () => {
     });
     expect(result.entry).toEqual(entry);
     expect(result.warnings.some((w) => w.includes('has no record'))).toBe(true);
+  });
+
+  it('warns and leaves the cache untouched when a 200 body is not JSON', async () => {
+    // Open Library occasionally answers 200 with an HTML error page. That is a
+    // failure, not a sparse record, so nothing may be cached: the next build
+    // has to retry rather than inherit an empty positive entry.
+    const fn = vi.fn(
+      async (): Promise<Response> =>
+        new Response('<html>oh no</html>', {
+          status: 200,
+          headers: { 'Content-Type': 'text/html' },
+        }),
+    );
+    const cache: Cache = {};
+    const entry = makeEntry({ isbn: '9780374275631' });
+    const result = await enrich(entry, {
+      userAgent: USER_AGENT,
+      cache,
+      fetchImpl: fn,
+      rateLimitMs: 0,
+    });
+    expect(result.entry).toEqual(entry);
+    expect(result.warnings.some((w) => w.includes('unparseable response'))).toBe(true);
+    expect(cache).toEqual({});
+    // The outcome is genuinely unknown, so no match quality is asserted.
+    expect(result.matchQuality).toBeUndefined();
   });
 
   it('pushes a warning and returns the entry unchanged on HTTP 500', async () => {

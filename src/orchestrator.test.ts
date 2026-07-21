@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -193,6 +193,33 @@ describe('getReads: input resolution', () => {
     expect(result.warnings.some((w) => w.includes('extension'))).toBe(true);
   });
 
+  it('accepts extras as { fetch }, calling the user-supplied fetcher', async () => {
+    const fetch = vi.fn(async () => ({
+      content: '- title: Dune\n  author: Frank Herbert\n  status: finished',
+      format: 'yaml' as const,
+    }));
+    const result = await getReads({
+      extras: { fetch },
+      userAgent: USER_AGENT,
+      skipEnrichment: true,
+    });
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(result.entries[0].title).toBe('Dune');
+    expect(result.entries[0].provenance).toBe('extras');
+  });
+
+  it('warns and skips libby when none of path, content, or fetch is set', async () => {
+    const result = await getReads({ libby: {}, userAgent: USER_AGENT, skipEnrichment: true });
+    expect(result.entries).toHaveLength(0);
+    expect(result.warnings.some((w) => w.startsWith('Libby input provided but none'))).toBe(true);
+  });
+
+  it('warns and skips extras when none of path, content, or fetch is set', async () => {
+    const result = await getReads({ extras: {}, userAgent: USER_AGENT, skipEnrichment: true });
+    expect(result.entries).toHaveLength(0);
+    expect(result.warnings.some((w) => w.startsWith('Extras input provided but none'))).toBe(true);
+  });
+
   it('warns when extras is { content } without format', async () => {
     const result = await getReads({
       extras: { content: '- title: Dune\n  author: Frank Herbert\n  status: finished' },
@@ -316,6 +343,25 @@ describe('getReads: merge semantics (same ISBN)', () => {
     expect(entry.finishedAt).toBe('2024-02-01');
   });
 
+  it('falls back to Libby title, author, and borrowedAt when extras has only an ISBN', async () => {
+    const result = await getReads({
+      libby: { content: libbyBorrowed },
+      // The minimum legal extras entry: an ISBN and a status, nothing else.
+      extras: {
+        content: '- isbn: "9780441172719"\n  status: finished',
+        format: 'yaml',
+      },
+      userAgent: USER_AGENT,
+      skipEnrichment: true,
+    });
+    expect(result.entries).toHaveLength(1);
+    const entry = result.entries[0];
+    expect(entry.title).toBe('Dune');
+    expect(entry.author).toBe('Frank Herbert');
+    expect(entry.borrowedAt).toBe('2024-01-15');
+    expect(entry.status).toBe('finished');
+  });
+
   it("uses extras format over Libby's", async () => {
     const result = await getReads({
       libby: { content: libbyBorrowed },
@@ -417,24 +463,6 @@ describe('getReads: enrichment', () => {
     expect(calls.some((c) => c.url.includes('9780000000002'))).toBe(true);
   });
 
-  it('shares rate-limiter state across enrich calls', async () => {
-    const { fn, calls } = okFetch();
-    await getReads({
-      libby: {
-        content: libbyCsv(
-          { title: 'A', author: 'X', isbn: '9780000000001', timestamp: 'January 1, 2024 10:30' },
-          { title: 'B', author: 'Y', isbn: '9780000000002', timestamp: 'January 2, 2024 10:30' },
-        ),
-      },
-      userAgent: USER_AGENT,
-      fetchImpl: fn as unknown as typeof fetch,
-      rateLimitMs: 40,
-    });
-    expect(calls.length).toBeGreaterThanOrEqual(2);
-    // The second entry's first request must wait for the first entry's budget.
-    expect(calls[1].at - calls[0].at).toBeGreaterThanOrEqual(40);
-  });
-
   it('skips enrichment entirely when skipEnrichment is true', async () => {
     const { fn, calls } = okFetch();
     await getReads({
@@ -496,6 +524,43 @@ describe('getReads: enrichment', () => {
     // Cache hit means no network call and the cached pageCount lands on the entry.
     expect(calls).toHaveLength(0);
     expect(result.entries[0].pageCount).toBe(999);
+  });
+});
+
+describe('getReads: rate limiting', () => {
+  // Fake timers, matching the treatment in enrich.test.ts. getReads builds its
+  // own rateLimiterState inside enrichAll and never exposes it, so the shared
+  // budget is asserted through the mocked clock's request timestamps instead.
+  // Those are exact under a frozen clock; the previous wall-clock delta could
+  // read 39 for a 40ms sleep and flaked under parallel-test CPU load.
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("makes the second entry wait a full interval for the first entry's budget", async () => {
+    const { fn, calls } = okFetch();
+    const start = Date.now();
+    const promise = getReads({
+      libby: {
+        content: libbyCsv(
+          { title: 'A', author: 'X', isbn: '9780000000001', timestamp: 'January 1, 2024 10:30' },
+          { title: 'B', author: 'Y', isbn: '9780000000002', timestamp: 'January 2, 2024 10:30' },
+        ),
+      },
+      userAgent: USER_AGENT,
+      fetchImpl: fn as unknown as typeof fetch,
+      rateLimitMs: 40,
+    });
+    await vi.runAllTimersAsync();
+    await promise;
+    // One request each: an empty ISBN response links no work, so nothing follows it.
+    expect(calls).toHaveLength(2);
+    // The first request fires immediately; the second waits out the shared budget.
+    expect(calls[0].at).toBe(start);
+    expect(calls[1].at).toBe(start + 40);
   });
 });
 
@@ -614,6 +679,22 @@ describe('getReads: sort and limit', () => {
     expect(result.entries.map((e) => e.title)).toEqual(['New', 'Mid', 'Old']);
   });
 
+  it('keeps entries that share a sortDate in pipeline order', async () => {
+    const result = await getReads({
+      extras: {
+        content:
+          '- title: First\n  author: X\n  status: finished\n  finishedAt: "2024-02-01"\n' +
+          '- title: Second\n  author: X\n  status: finished\n  finishedAt: "2024-02-01"',
+        format: 'yaml',
+      },
+      userAgent: USER_AGENT,
+      skipEnrichment: true,
+    });
+    // The comparator returns 0 for equal dates and Array.sort is stable, so a
+    // tie keeps the order the pipeline produced rather than shuffling.
+    expect(result.entries.map((e) => e.title)).toEqual(['First', 'Second']);
+  });
+
   it('applies limit after sort', async () => {
     const result = await getReads({
       extras: { content: threeExtras, format: 'yaml' },
@@ -666,6 +747,24 @@ describe('getReads: cache I/O', () => {
       rateLimitMs: 0,
     });
     expect(result.entries[0].pageCount).toBe(123);
+  });
+
+  it('rejects when cache.path is a directory rather than a file', async () => {
+    // A directory fails the read with EISDIR (the non-ENOENT branch, which
+    // warns and starts fresh) and then fails the rename in writeCacheFile,
+    // which cleans up the tmp file and rethrows. The write is what surfaces:
+    // read and write share one path, so a path that breaks one breaks both.
+    const cachePath = join(tmp, 'cache-dir');
+    mkdirSync(cachePath);
+    await expect(
+      getReads({
+        libby: { content: oneIsbn },
+        cache: { path: cachePath },
+        userAgent: USER_AGENT,
+        skipEnrichment: true,
+      }),
+    ).rejects.toThrow();
+    expect(existsSync(`${cachePath}.tmp`)).toBe(false);
   });
 
   it('persists a notFound entry across builds and reuses it without refetching', async () => {
@@ -806,6 +905,27 @@ describe('getReads: Open Library unavailable rollup', () => {
       fetchImpl: fn as unknown as typeof fetch,
       rateLimitMs: 0,
     });
+    expect(result.warnings[0]).toContain('Open Library appears to be unavailable');
+    expect(result.warnings[0]).toContain('2 of 2');
+  });
+
+  it('counts an unparseable Open Library response toward the rollup', async () => {
+    // A 200 whose body is not JSON: the enricher warns "unparseable response",
+    // and isTransportFailure has to recognise that wording, not just HTTP codes.
+    const fn = vi.fn(
+      async (): Promise<Response> =>
+        new Response('<html>502 Bad Gateway</html>', {
+          status: 200,
+          headers: { 'Content-Type': 'text/html' },
+        }),
+    );
+    const result = await getReads({
+      libby: { content: twoIsbn },
+      userAgent: USER_AGENT,
+      fetchImpl: fn as unknown as typeof fetch,
+      rateLimitMs: 0,
+    });
+    expect(result.warnings.some((w) => w.includes('unparseable response'))).toBe(true);
     expect(result.warnings[0]).toContain('Open Library appears to be unavailable');
     expect(result.warnings[0]).toContain('2 of 2');
   });

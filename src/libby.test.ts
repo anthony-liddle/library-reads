@@ -41,6 +41,37 @@ describe('parseLibbyCsv: happy path', () => {
 
     expect(result.entries[0]?.activity).toBe('Borrowed');
   });
+
+  it('parses a row missing its trailing columns, leaving those fields undefined', () => {
+    // A row that stops after activity. relax_column_count keeps it, and the
+    // absent library and details columns arrive as undefined rather than ''.
+    const csv = [
+      HEADER,
+      'https://img.example.com/a.jpg,Short But Valid,An Author,A Publisher,9780000000014,"May 04, 2026 08:00",Borrowed',
+    ].join('\n');
+
+    const result = parseLibbyCsv(csv);
+
+    expect(result.warnings).toEqual([]);
+    expect(result.entries).toHaveLength(1);
+    expect(result.entries[0]?.title).toBe('Short But Valid');
+    expect(result.entries[0]?.library).toBeUndefined();
+    expect(result.entries[0]?.details).toBeUndefined();
+  });
+
+  it('surfaces an empty activity column as an empty string, not undefined', () => {
+    // activity is the one required field with a '' fallback: an empty column
+    // stays an empty string so the RawLibbyEntry shape does not change.
+    const csv = [
+      HEADER,
+      'https://img.example.com/a.jpg,No Activity Book,An Author,A Publisher,9780000000013,"April 01, 2026 12:00",,Example Library,',
+    ].join('\n');
+
+    const result = parseLibbyCsv(csv);
+
+    expect(result.warnings).toEqual([]);
+    expect(result.entries[0]?.activity).toBe('');
+  });
 });
 
 describe('parseLibbyCsv: quoted fields with embedded commas', () => {
@@ -207,6 +238,37 @@ describe('parseLibbyCsv: malformed rows are skipped with warnings', () => {
     expect(result.warnings).toHaveLength(1);
     expect(result.warnings[0]).toContain('A Book With A Bad Date');
     expect(result.warnings[0]).toContain('not a date');
+  });
+
+  it('skips a truncated row whose timestamp column is absent entirely', () => {
+    // relax_column_count lets a short row through with its trailing keys unset,
+    // so timestamp arrives as undefined rather than as an unparseable string.
+    const csv = [
+      HEADER,
+      'https://img.example.com/short.jpg,A Truncated Row,An Author,A Publisher',
+    ].join('\n');
+
+    const result = parseLibbyCsv(csv);
+
+    expect(result.entries).toHaveLength(0);
+    expect(result.warnings).toHaveLength(1);
+    expect(result.warnings[0]).toContain('A Truncated Row');
+    expect(result.warnings[0]).toContain('""');
+  });
+
+  it('skips a row whose month name is not a real month', () => {
+    // Shaped like a Libby timestamp and matched by the regex, but Smarch is not
+    // in the month table, so the lookup fails rather than producing a bad date.
+    const csv = [
+      HEADER,
+      'https://img.example.com/x.jpg,A Book With A Fake Month,An Author,A Publisher,9780000000012,"Smarch 05, 2026 11:00",Borrowed,Example Library,',
+    ].join('\n');
+
+    const result = parseLibbyCsv(csv);
+
+    expect(result.entries).toHaveLength(0);
+    expect(result.warnings).toHaveLength(1);
+    expect(result.warnings[0]).toContain('Smarch');
   });
 
   it('skips a row with a missing title and records a warning', () => {

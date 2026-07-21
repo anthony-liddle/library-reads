@@ -512,6 +512,18 @@ describe('parseExtras: malformed input', () => {
     expect(result.warnings).toEqual([]);
   });
 
+  it('skips a list item that is not an object and keeps the rest', () => {
+    const result = parseExtras(
+      JSON.stringify(['just a string', { status: 'finished', isbn: '9781234567890' }]),
+      'json',
+    );
+
+    expect(result.entries).toHaveLength(1);
+    expect(result.warnings).toHaveLength(1);
+    expect(result.warnings[0]).toContain('#1');
+    expect(result.warnings[0]).toContain('must be an object');
+  });
+
   it('handles a completely empty string gracefully', () => {
     const result = parseExtras('', 'yaml');
 
