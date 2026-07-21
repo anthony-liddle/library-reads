@@ -62,28 +62,58 @@ The separate "Publishing access" section on the same page (the two-factor
 authentication options) does not need changing: npm notes that trusted publishers
 keep working regardless of which option is selected there.
 
-### Step c. Enable branch protection on `main` (GitHub, once, after CI is green)
+### Step c. Enable branch protection on `main` (once, after CI is green)
 
-After the CI workflow has run at least once on `main` so the check is registered,
-optionally protect `main`. As a solo maintainer, configure it so you do not lock
-yourself out:
+Run `pnpm setup:branch-protection` after the first CI run has landed on `main`.
 
-In Settings, Branches, add a rule for `main`:
+The script applies the intended protection state idempotently: it reads the live
+settings, prints one line per field it would change, asks before writing, and
+verifies the result. Run it any time you want to confirm or restore the intended
+state, not just during setup; if nothing has drifted it reports that and exits.
+Pass `--dry-run` to see the diff and the payload without writing anything. The
+intended state itself is documented in the comment block at the top of
+`scripts/branch-protection.mjs`, which is the source of truth.
 
-- Require a pull request before merging: ON.
-- Require approvals: set to **0** (do not require approvals; you cannot approve your
-  own pull requests).
-- Require status checks to pass before merging: ON, and select the **`verify`**
-  check.
-- Require branches to be up to date before merging: optional.
-- Do NOT enable "Do not allow bypassing the above settings" / "Include
-  administrators", so you can still merge your own pull requests.
-
-This gives you a required green CI gate without a second reviewer and without a
-deadlock.
+"After the first CI run" is load-bearing. Branch protection can only require a
+status check that GitHub has already seen at least once, so if you run the script
+before CI has ever run on `main`, the write succeeds but the required check does
+not stick. Merge one pull request first, let `verify` run, then run the script.
 
 ### Step d. From then on
 
 Releases are automatic: bump the version, push to `main`, create a GitHub Release,
 and the workflow publishes with provenance and no token. You only repeat steps a
 through c if you move the repo, rename the workflow, or change the environment name.
+
+## Appendix: Manual branch protection setup (if the script isn't available)
+
+Use this only when the scripted path in step c is not an option: `gh` is not
+installed or cannot be authenticated, the script is broken, the settings are being
+configured from an account that cannot run it, or some other atypical situation.
+The script is the primary path and the source of truth. This appendix exists so a
+human can reproduce the same result by hand, and it must be kept in step with
+`scripts/branch-protection.mjs` if the intended state ever changes.
+
+1. Navigate to `github.com/anthony-liddle/library-reads/settings/branches`.
+2. Edit the branch protection rule for `main`, or create one if none exists yet.
+3. Turn ON "Require a pull request before merging".
+4. Set "Require approvals" to **0**. A solo maintainer cannot approve their own
+   pull requests, so any higher number deadlocks every PR.
+5. Leave "Require review from Code Owners" OFF.
+6. Leave "Dismiss stale pull request approvals when new commits are pushed" OFF,
+   and leave "Require approval of the most recent reviewable push" OFF.
+7. Turn ON "Require status checks to pass before merging".
+8. Turn ON "Require branches to be up to date before merging".
+9. In the status-check search, type `verify` and select the **`verify`** job from
+   the CI workflow. This is the job name in `.github/workflows/ci.yml`.
+10. Leave "Do not allow bypassing the above settings" OFF, so the maintainer is
+    not locked out during a genuine emergency.
+11. Leave "Allow force pushes" and "Allow deletions" OFF.
+12. Save.
+
+Then confirm it took: open a small pull request (a comment-only or whitespace
+change) and check that the merge button stays grey until `verify` completes green.
+
+If `verify` does not appear in the status-check search at step 9, CI has not run on
+`main` yet. Merge one pull request, let CI run, then come back to this screen and
+the check will be selectable.
