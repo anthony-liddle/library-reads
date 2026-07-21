@@ -20,7 +20,7 @@ jobs:
       contents: read
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           # Build from the exact tag the release points at, not a branch head.
           ref: ${{ github.ref }}
@@ -29,7 +29,7 @@ jobs:
         uses: pnpm/action-setup@v6
 
       - name: Setup Node
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: pnpm
