@@ -1,0 +1,35 @@
+# Weekly dependency updates, grouped by kind.
+#
+# The npm ecosystem is split into two groups on purpose. Runtime dependencies
+# (csv-parse, yaml) ship to consumers, so they get their own PR and their own
+# read. Dev tooling (tsdown, vitest, biome, attw, publint, @types/*) churns far
+# more often and matters far less, so it collapses into one PR per week.
+# github-actions is its own ecosystem and moves independently of npm, so it is
+# reviewed as a single set.
+#
+# There is deliberately no auto-merge here. This package publishes to npm with
+# provenance, and a dependency that passes the test suite can still do something
+# unwanted at install time, so every update gets a human read before merge.
+version: 2
+
+updates:
+  - package-ecosystem: 'npm'
+    directory: '/'
+    schedule:
+      interval: 'weekly'
+    open-pull-requests-limit: 5
+    groups:
+      production:
+        dependency-type: 'production'
+      development:
+        dependency-type: 'development'
+
+  - package-ecosystem: 'github-actions'
+    directory: '/'
+    schedule:
+      interval: 'weekly'
+    open-pull-requests-limit: 3
+    groups:
+      actions:
+        patterns:
+          - '*'
