@@ -1,6 +1,0 @@
-# Code owners for library-reads.
-# These owners are requested for review on every pull request, and — once branch
-# protection's "require code owner reviews" is enabled — must approve before merge.
-# Order matters: the last matching pattern takes precedence.
-
-* @anthony-liddle
