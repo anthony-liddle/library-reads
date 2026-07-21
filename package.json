@@ -71,7 +71,7 @@
     }
   },
   "dependencies": {
-    "csv-parse": "^6.2.1",
+    "csv-parse": "^7.0.1",
     "yaml": "^2.9.0"
   }
 }
