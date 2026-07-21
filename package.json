@@ -27,6 +27,7 @@
     "lint": "biome lint .",
     "format": "biome format --write .",
     "check": "biome check .",
+    "setup:branch-protection": "node scripts/branch-protection.mjs",
     "prepublishOnly": "pnpm run check && pnpm run typecheck && pnpm run test && pnpm run build && pnpm exec publint && pnpm exec attw --pack . --profile esm-only"
   },
   "keywords": [
