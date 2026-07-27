@@ -29,6 +29,10 @@ export interface CacheConfig {
 export interface GetReadsOptions {
   libby?: LibbyInput;
   extras?: ExtrasInput;
+  /**
+   * Enrichment cache config. Omit it entirely to disable caching: there is no
+   * `false` spelling, and no cache file is read or written when it is absent.
+   */
   cache?: CacheConfig;
   /** Required: Open Library asks for identifying requests. */
   userAgent: string;
@@ -44,6 +48,19 @@ export interface GetReadsOptions {
   fetchImpl?: typeof globalThis.fetch;
   /** Min ms between Open Library requests. Default 1000. */
   rateLimitMs?: number;
+}
+
+/**
+ * Resolve the cache file path, or undefined when caching is off.
+ *
+ * Caching is off when `cache` is omitted, which is the documented spelling.
+ * The nullish-path checks also absorb an untyped caller passing `cache: false`
+ * or a config with no `path`, both of which used to reach the filesystem with
+ * an undefined path and crash the build rather than simply not caching.
+ */
+function cachePathOf(cache: CacheConfig | undefined): string | undefined {
+  const path: unknown = cache?.path;
+  return typeof path === 'string' && path !== '' ? path : undefined;
 }
 
 /** Map `.yaml`/`.yml` to yaml, `.json` to json, anything else to undefined. */
@@ -136,7 +153,13 @@ async function readCacheFile(path: string): Promise<{ cache: Cache; warnings: st
  * over the target (atomic on POSIX and modern Windows). On failure the tmp file
  * is cleaned up and the error is re-thrown.
  */
-async function writeCacheFile(path: string, cache: Cache): Promise<void> {
+async function writeCacheFile(path: string | undefined, cache: Cache): Promise<void> {
+  // Defense in depth: getReads only calls this once cachePath has resolved to a
+  // real path, but a nullish path reaching fs.rename crashes the whole build
+  // with ERR_INVALID_ARG_TYPE. No path means no caching, so there is nothing to do.
+  if (path === undefined || path === '') {
+    return;
+  }
   const tmpPath = `${path}.tmp`;
   try {
     await writeFile(tmpPath, JSON.stringify(cache, null, 2), 'utf-8');
@@ -356,9 +379,10 @@ export async function getReads(options: GetReadsOptions): Promise<ReadResult> {
   }
 
   // 3. Read cache (skipped when ignoreReads is set, but still written back later).
+  const cachePath = cachePathOf(options.cache);
   let cache: Cache = {};
-  if (options.cache !== undefined && options.cache.ignoreReads !== true) {
-    const resolved = await readCacheFile(options.cache.path);
+  if (cachePath !== undefined && options.cache?.ignoreReads !== true) {
+    const resolved = await readCacheFile(cachePath);
     cache = resolved.cache;
     warnings.push(...resolved.warnings);
   }
@@ -420,9 +444,7 @@ export async function getReads(options: GetReadsOptions): Promise<ReadResult> {
   }
 
   // 11. Write the cache back atomically when a cache path was configured.
-  if (options.cache !== undefined) {
-    await writeCacheFile(options.cache.path, cache);
-  }
+  await writeCacheFile(cachePath, cache);
 
   // 12. lastEntryDate is the max sortDate (entries are sorted descending).
   const lastEntryDate = entries.length > 0 ? entries[0].sortDate : undefined;
