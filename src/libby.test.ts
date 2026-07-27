@@ -354,50 +354,114 @@ describe('parseLibbyCsv: header validation', () => {
     expect(result.entries[0]?.title).toBe('Header Test Book');
   });
 
-  it('refuses to parse and warns when a column is missing', () => {
+  it('warns once and parses anyway when a column is missing', () => {
     const header = 'cover,title,author,publisher,isbn,timestamp,activity,library';
-    const csv = [header, GOOD_ROW].join('\n');
+    const row =
+      'https://img.example.com/h.jpg,Header Test Book,An Author,A Publisher,9780000000020,"March 15, 2026 10:00",Borrowed,Example Library';
+    const csv = [header, row].join('\n');
 
     const result = parseLibbyCsv(csv);
 
-    expect(result.entries).toHaveLength(0);
+    expect(result.entries).toHaveLength(1);
+    expect(result.entries[0]?.title).toBe('Header Test Book');
+    expect(result.entries[0]?.details).toBeUndefined();
     expect(result.warnings).toHaveLength(1);
-    expect(result.warnings[0]?.toLowerCase()).toContain('header mismatch');
+    expect(result.warnings[0]?.toLowerCase()).toContain('missing');
+    expect(result.warnings[0]).toContain('details');
   });
 
-  it('refuses to parse and warns when an extra column is appended', () => {
-    const header = `${HEADER},notes`;
-    const csv = [header, GOOD_ROW].join('\n');
+  it('warns once naming every missing column when several are absent', () => {
+    const header = 'cover,title,author,publisher,isbn,timestamp,activity';
+    const row =
+      'https://img.example.com/h.jpg,Header Test Book,An Author,A Publisher,9780000000020,"March 15, 2026 10:00",Borrowed';
+    const csv = [header, row].join('\n');
 
     const result = parseLibbyCsv(csv);
 
-    expect(result.entries).toHaveLength(0);
+    expect(result.entries).toHaveLength(1);
+    expect(result.entries[0]?.library).toBeUndefined();
+    expect(result.entries[0]?.details).toBeUndefined();
     expect(result.warnings).toHaveLength(1);
-    expect(result.warnings[0]?.toLowerCase()).toContain('header mismatch');
+    expect(result.warnings[0]).toContain('library');
+    expect(result.warnings[0]).toContain('details');
+  });
+
+  it('warns once and parses anyway when an extra column is appended', () => {
+    const header = `${HEADER},notes`;
+    const csv = [header, `${GOOD_ROW},some note`].join('\n');
+
+    const result = parseLibbyCsv(csv);
+
+    expect(result.entries).toHaveLength(1);
+    expect(result.entries[0]?.title).toBe('Header Test Book');
+    expect(result.entries[0]?.details).toBe('14 days');
+    expect(result.warnings).toHaveLength(1);
+    expect(result.warnings[0]?.toLowerCase()).toContain('unexpected');
     expect(result.warnings[0]).toContain('notes');
   });
 
-  it('refuses to parse and warns when a column is renamed', () => {
+  it('warns about both the missing and the unexpected column when one is renamed', () => {
     const header = 'cover,title,author,publisher,isbn13,timestamp,activity,library,details';
     const csv = [header, GOOD_ROW].join('\n');
 
     const result = parseLibbyCsv(csv);
 
-    expect(result.entries).toHaveLength(0);
-    expect(result.warnings).toHaveLength(1);
-    expect(result.warnings[0]?.toLowerCase()).toContain('header mismatch');
-    expect(result.warnings[0]).toContain('isbn13');
+    expect(result.entries).toHaveLength(1);
+    expect(result.entries[0]?.title).toBe('Header Test Book');
+    expect(result.entries[0]?.isbn).toBeUndefined();
+    expect(result.warnings).toHaveLength(2);
+    expect(result.warnings.join(' ')).toContain('isbn13');
+    expect(result.warnings.join(' ')).toContain('isbn');
   });
 
-  it('refuses to parse and warns when columns are reordered', () => {
-    const header = 'cover,author,title,publisher,isbn,timestamp,activity,library,details';
-    const csv = [header, GOOD_ROW].join('\n');
+  it('parses reordered columns identically to canonical order, with no warnings', () => {
+    const shuffled = 'title,cover,isbn,author,details,timestamp,library,publisher,activity';
+    const shuffledRow =
+      'Header Test Book,https://img.example.com/h.jpg,9780000000020,An Author,14 days,"March 15, 2026 10:00",Example Library,A Publisher,Borrowed';
+
+    const result = parseLibbyCsv([shuffled, shuffledRow].join('\n'));
+    const canonical = parseLibbyCsv([HEADER, GOOD_ROW].join('\n'));
+
+    expect(result.warnings).toEqual([]);
+    expect(result.entries).toEqual(canonical.entries);
+  });
+
+  it('keeps details populated when Libby swaps the library and details columns', () => {
+    // The July 2026 Libby export change that motivated the presence-based check:
+    // `details` and `library` arrived in the opposite order on every row.
+    const header = 'cover,title,author,publisher,isbn,timestamp,activity,details,library';
+    const row =
+      'https://img.example.com/h.jpg,Header Test Book,An Author,A Publisher,9780000000020,"March 15, 2026 10:00",Borrowed,14 days,Example Library';
+
+    const result = parseLibbyCsv([header, row].join('\n'));
+
+    expect(result.warnings).toEqual([]);
+    expect(result.entries).toHaveLength(1);
+    expect(result.entries[0]?.details).toBe('14 days');
+    expect(result.entries[0]?.library).toBe('Example Library');
+  });
+
+  it('refuses to parse when the first line has none of the expected columns', () => {
+    const csv = [
+      'https://img.example.com/h.jpg,Some Book,An Author,"March 15, 2026 10:00"',
+      GOOD_ROW,
+    ].join('\n');
 
     const result = parseLibbyCsv(csv);
 
     expect(result.entries).toHaveLength(0);
     expect(result.warnings).toHaveLength(1);
-    expect(result.warnings[0]?.toLowerCase()).toContain('header mismatch');
+    expect(result.warnings[0]?.toLowerCase()).toContain('does not look like a libby export');
+  });
+
+  it('warns rather than throwing when the CSV body is unparseable', () => {
+    const csv = [HEADER, '"unclosed quote,Some Book,An Author'].join('\n');
+
+    const result = parseLibbyCsv(csv);
+
+    expect(result.entries).toHaveLength(0);
+    expect(result.warnings).toHaveLength(1);
+    expect(result.warnings[0]?.toLowerCase()).toContain('could not be parsed');
   });
 
   it('tolerates a header with different letter case', () => {
