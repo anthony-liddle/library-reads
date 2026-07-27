@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Cache } from './enrich.js';
+import type { GetReadsOptions } from './orchestrator.js';
 import { getReads } from './orchestrator.js';
 
 const USER_AGENT = 'library-reads/0.0.1 (test@example.com)';
@@ -887,6 +888,91 @@ describe('getReads: cache I/O', () => {
     // ignoreReads forces a refetch (the read is skipped) ...
     expect(calls.length).toBeGreaterThan(0);
     // ... and the cache is still written back.
+    expect(existsSync(cachePath)).toBe(true);
+  });
+});
+
+describe('getReads: caching off', () => {
+  const oneIsbn = libbyCsv({
+    title: 'A',
+    isbn: '9780000000001',
+    timestamp: 'January 1, 2024 10:30',
+  });
+
+  it('returns entries without throwing when cache is omitted', async () => {
+    const { fn } = okFetch();
+    const result = await getReads({
+      libby: { content: oneIsbn },
+      userAgent: USER_AGENT,
+      fetchImpl: fn as unknown as typeof fetch,
+      rateLimitMs: 0,
+    });
+    expect(result.entries).toHaveLength(1);
+    expect(result.entries[0].title).toBe('A');
+    expect(result.warnings).toEqual([]);
+  });
+
+  it('writes no cache file anywhere when cache is omitted', async () => {
+    const { fn } = okFetch();
+    await getReads({
+      libby: { content: oneIsbn },
+      userAgent: USER_AGENT,
+      fetchImpl: fn as unknown as typeof fetch,
+      rateLimitMs: 0,
+    });
+    expect(existsSync(join(tmp, 'cache.json'))).toBe(false);
+    expect(existsSync('undefined')).toBe(false);
+    expect(existsSync('undefined.tmp')).toBe(false);
+  });
+
+  it('does not throw when a JS caller passes cache: false', async () => {
+    // `cache: false` is not in the CacheConfig union, so TypeScript already
+    // rejects it. An untyped consumer can still reach this path, and it used
+    // to crash in fs.rename with ERR_INVALID_ARG_TYPE rather than simply
+    // behaving like caching off. The cast reproduces that caller.
+    const { fn } = okFetch();
+    const options = {
+      libby: { content: oneIsbn },
+      cache: false,
+      userAgent: USER_AGENT,
+      fetchImpl: fn as unknown as typeof fetch,
+      rateLimitMs: 0,
+    } as unknown as GetReadsOptions;
+
+    const result = await getReads(options);
+
+    expect(result.entries).toHaveLength(1);
+    expect(result.warnings).toEqual([]);
+    expect(existsSync('undefined')).toBe(false);
+  });
+
+  it('does not throw or warn when a JS caller passes a cache without a path', async () => {
+    const { fn } = okFetch();
+    const options = {
+      libby: { content: oneIsbn },
+      cache: {},
+      userAgent: USER_AGENT,
+      fetchImpl: fn as unknown as typeof fetch,
+      rateLimitMs: 0,
+    } as unknown as GetReadsOptions;
+
+    const result = await getReads(options);
+
+    expect(result.entries).toHaveLength(1);
+    expect(result.warnings).toEqual([]);
+  });
+
+  it('still reads and writes the cache file when a valid CacheConfig is given', async () => {
+    const cachePath = join(tmp, 'cache.json');
+    const { fn } = okFetch();
+    const result = await getReads({
+      libby: { content: oneIsbn },
+      cache: { path: cachePath },
+      userAgent: USER_AGENT,
+      fetchImpl: fn as unknown as typeof fetch,
+      rateLimitMs: 0,
+    });
+    expect(result.entries).toHaveLength(1);
     expect(existsSync(cachePath)).toBe(true);
   });
 });

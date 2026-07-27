@@ -136,6 +136,8 @@ Three options give you surgical control when you need it:
 - `cache.bust`: an array of cache keys to force-refetch this run, for when you know a specific record changed.
 - `cache.ignoreReads`: skip reading the cache this run, but still write it, for when you want fresh data without throwing away the file.
 
+To turn caching off, leave `cache` out of the options entirely. That is the only spelling; there is no `cache: false`.
+
 Open Library 404s are cached too, so the books it doesn't have stop being re-fetched on every build. The cache is for everything I learned, not just the things I learned successfully.
 
 ## Why This Exists
