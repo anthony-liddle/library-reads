@@ -7,7 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.1.0] - 2026-MM-DD
+## [0.1.1] - 2026-07-27
+
+### Fixed
+
+- `parseLibbyCsv` no longer drops the entire CSV when Libby reorders columns.
+  The header is now checked by column presence rather than position, because
+  rows are keyed by column name and order never mattered to the parser. A
+  reorder parses silently; a missing or unexpected column warns once and still
+  parses, leaving those fields undefined per row. Only a header with none of
+  the expected columns is refused. Found in use: a July 2026 Libby export
+  change swapped `details` and `library`, and 0.1.0 returned zero entries from
+  a 55-row export.
+- `parseLibbyCsv` warns instead of throwing when the CSV body is unparseable.
+  Damage that the row-level tolerances cannot absorb, such as an unclosed
+  quote, previously escaped as an exception and took the whole build with it.
+- `getReads` no longer crashes when caching is off. Passing `cache: false`
+  from untyped code reached `fs.rename` with an undefined path and threw
+  `ERR_INVALID_ARG_TYPE`; the same undefined path also produced a nonsense
+  `Cache file undefined could not be read` warning on the read side. Both call
+  sites now resolve the path once and skip cache I/O entirely when there
+  isn't one. Caching is disabled by omitting `cache`, which is now stated in
+  the `GetReadsOptions.cache` JSDoc and the README.
+
+## [0.1.0] - 2026-06-01
 
 ### Added
 
@@ -30,5 +53,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ISBN-404 fallback to title+author search, so Libby's audiobook-ISBN-heavy
   exports still enrich most entries.
 
-[Unreleased]: https://github.com/anthony-liddle/library-reads/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/anthony-liddle/library-reads/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/anthony-liddle/library-reads/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/anthony-liddle/library-reads/releases/tag/v0.1.0
