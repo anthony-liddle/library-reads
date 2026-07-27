@@ -1,6 +1,6 @@
 {
   "name": "library-reads",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Read a Libby export and optional manual entries into a typed array of recent reads, with Open Library enrichment.",
   "type": "module",
   "sideEffects": false,
