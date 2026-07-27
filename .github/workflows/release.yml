@@ -31,8 +31,26 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v7
         with:
+          # Trusted publishing needs Node >= 22.14.0. The 22 line resolves to
+          # the latest 22.x, which clears that comfortably.
           node-version: 22
           cache: pnpm
+
+      # Trusted publishing needs npm >= 11.5.1, and Node 22 bundles npm 10.9.x,
+      # which has no OIDC support at all: it never attempts the token exchange
+      # and fails with ENEEDAUTH. `pnpm publish` delegates the actual upload to
+      # the npm CLI, so npm's version is what governs here, not pnpm's. Pinned
+      # to the 11 line rather than latest, because a release pipeline should not
+      # pick up a new npm major on its own.
+      - name: Upgrade npm for trusted publishing
+        run: npm install --global npm@^11.5.1
+
+      # Recorded so a future auth failure can be diagnosed from the log alone.
+      - name: Record toolchain versions
+        run: |
+          node --version
+          npm --version
+          pnpm --version
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile

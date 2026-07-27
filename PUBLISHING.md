@@ -85,6 +85,34 @@ Releases are automatic: bump the version, push to `main`, create a GitHub Releas
 and the workflow publishes with provenance and no token. You only repeat steps a
 through c if you move the repo, rename the workflow, or change the environment name.
 
+## Toolchain requirement: npm 11.5.1 or later
+
+Trusted publishing needs npm >= 11.5.1 and Node >= 22.14.0. This is easy to miss,
+because the release workflow runs `pnpm publish` and pnpm's own version has nothing
+to do with it: pnpm delegates the actual upload to the npm CLI, so npm's version is
+what governs.
+
+Node 22 bundles npm 10.9.x, which has no OIDC support whatsoever. It does not fail
+the token exchange, it never attempts one, and the publish falls through to
+"you need to log in". The release workflow therefore installs npm from the 11 line
+explicitly before publishing, and prints `node`, `npm`, and `pnpm` versions so the
+next auth failure can be diagnosed from the log alone.
+
+Read the failure mode by its error code:
+
+- **`ENEEDAUTH` ("need auth ... requires you to be logged in")**: no credentials
+  were presented at all. The client is the suspect, not the registry. Check the
+  npm version first, then that `id-token: write` is set on the job, then that no
+  empty `NODE_AUTH_TOKEN` is in the environment (an empty token defeats OIDC,
+  because npm tries to use it instead).
+- **`404`**: credentials were presented and the registry rejected the trust link.
+  The suspect is the trusted-publisher config in step b. Every field has to match
+  the workflow exactly, including the `.yml` extension on the filename and the
+  environment name.
+
+This bit the 0.1.1 release, which failed at `ENEEDAUTH` after building a correct
+tarball. Everything up to authentication had already passed.
+
 ## Appendix: Manual branch protection setup (if the script isn't available)
 
 Use this only when the scripted path in step c is not an option: `gh` is not
