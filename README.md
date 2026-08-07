@@ -1,5 +1,9 @@
 # library-reads
 
+[![npm](https://img.shields.io/npm/v/library-reads.svg)](https://www.npmjs.com/package/library-reads)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![TypeScript](https://img.shields.io/badge/TypeScript-7.0-blue.svg)](https://www.typescriptlang.org/)
+
 I read mostly through Libby. I also pick up physical books from the library and from Powell's, and now and then I'm reading something a friend lent me. This package turns a Libby export, plus a small hand-edited extras file, into a typed array of my recent reads, enriched with covers and metadata from Open Library. The output is meant to drop straight onto a "Lately" page: what I've been reading, in the order I read it.
 
 It's built around how I actually read, not around a service. If that happens to match how you read, you're welcome to it.
